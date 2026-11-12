@@ -18,6 +18,6 @@
 - Android：文库与书架切换、设置、本地测试 EPUB 打开、目录跳转与进度持久化。
 - 测试 EPUB 的内容为项目自写测试文本，不包含第三方小说。
 
-Action 的 `build-reports` 与 `device-reports` 保存相应报告。仪器测试需手动运行 Android 工作流并启用 emulator；设备截图随 `device-reports` 上传。
+以上为首版开发期间的历史记录。1.1 按使用者要求只执行 APK 编译，不继续运行测试或模拟器；当前 Android Action 仅生成安装包。
 
 尚需更多设备回归：特大 EPUB、不同厂商 WebView、长章节、源站目录重排。自动测试不代表所有设备均已验证。

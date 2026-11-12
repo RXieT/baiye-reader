@@ -25,6 +25,11 @@ data class ReadingProgress(
     val fraction: Double = 0.0,
     val chapter: String = "",
     val chapterId: String = "",
+    val tocHref: String = "",
+    val sectionIndex: Int = 0,
+    val sectionCount: Int = 0,
+    val page: Int = 1,
+    val pageCount: Int = 1,
 )
 
 @Serializable
@@ -45,6 +50,14 @@ data class ReaderSettings(
     val scroll: Boolean = false,
     val serif: Boolean = true,
     val keepScreenOn: Boolean = true,
+    val fontWeight: Int = 400,
+    val paragraphSpacing: Double = 0.6,
+    val pageMargin: Int = 24,
+    val brightness: Float = -1f,
+    val volumeKeys: Boolean = false,
+    val animatedPage: Boolean = true,
+    val showReadingStatus: Boolean = true,
+    val immersive: Boolean = true,
 )
 
 @Serializable

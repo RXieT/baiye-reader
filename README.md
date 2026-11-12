@@ -2,7 +2,7 @@
 
 首先说明是vibecoding项目，下述readme由ai填写，因为只是用于满足个人所需所以我不会补充readme，也不会长时间更新。
 
-Android 轻小说阅读器。文库、搜索、收藏、阅读记录、章节缓存和 EPUB 导入。界面使用白底排版与 Miuix OS4 组件。
+Android 轻小说阅读器。支持文库自动翻页加载、书架、章节缓存和 EPUB 导入。使用白底界面与 Miuix OS4 玻璃底栏。阅读页提供时间、电量、章节页码，以及目录、排版、背景和阅读控制分级菜单。
 
 需要 Android 13 及以上、较新的 Android System WebView。安装包见 [Actions](https://github.com/RXieT/baiye-reader/actions/workflows/android.yml) 的 `Baiye-Android`，其中 `Baiye.apk` 可直接安装。
 

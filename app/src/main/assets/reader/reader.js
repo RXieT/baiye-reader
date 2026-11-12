@@ -2,18 +2,21 @@
 const ORIGIN = 'https://appassets.androidplatform.net'
 const DEFAULTS = {
     fontSize: 20, lineHeight: 1.8, theme: 'paper', scroll: false,
-    serif: true, keepScreenOn: true,
+    serif: true, keepScreenOn: true, fontWeight: 400, paragraphSpacing: .6,
+    pageMargin: 24, brightness: -1, volumeKeys: false, animatedPage: true,
+    showReadingStatus: true, immersive: true,
 }
 const COLORS = {
     paper: ['#F6F1E7', '#24211D', '#78542B'],
     white: ['#FFFFFF', '#202020', '#305F99'],
+    green: ['#E3EDDF', '#243427', '#386347'],
     night: ['#171717', '#DEDAD2', '#A9C8EF'],
 }
 let session, engine, view, book, controller, latest, fault, retryTarget
 let settings = { ...DEFAULTS }
 let generation = 0, serial = Promise.resolve(), turnQueued = false
 let working = false, ready = false, pendingLoaded = false, touchUntil = 0
-let activeTarget, layoutObserver
+let activeTarget, layoutObserver, pagination
 
 function send(message) {
     if (window.top !== window) return
@@ -122,6 +125,18 @@ function onlineBook(data, signal) {
         url.hash = ''
         return [url.href, fragment]
     }
+    // Keep contiguous volumes in source order (including repeated volume names).
+    const toc = []
+    let group
+    for (const row of rows) {
+        const label = String(row.volume || '').trim()
+        if (!label) { group = undefined; toc.push({ label: row.title, href: row.url }); continue }
+        if (!group || group.label !== label) {
+            group = { label, subitems: [] }
+            toc.push(group)
+        }
+        group.subitems.push({ label: row.title, href: row.url })
+    }
     return {
         metadata: { title: data.book.title, author: data.book.author, language: 'zh-CN' },
         dir: 'ltr',
@@ -147,14 +162,14 @@ function onlineBook(data, signal) {
             },
             resolveHref: href => new URL(href, row.url).href,
         })),
-        toc: rows.map(row => ({ label: row.title, href: row.url })),
+        toc,
         resolveHref(href) {
             const [url, fragment] = parse(href)
             const index = indices.get(url)
             if (index === undefined) throw new Error('无效的章节链接')
             return { index, anchor: doc => fragment ? doc.getElementById(fragment) ?? 0 : 0 }
         },
-        splitTOCHref: href => parse(href),
+        splitTOCHref: href => href ? parse(href) : [],
         getTOCFragment: (doc, id) => id ? doc.getElementById(id) : doc.documentElement,
         isExternal(href) {
             try { return !indices.has(parse(href)[0]) } catch { return true }
@@ -171,24 +186,37 @@ function cleanSettings(patch) {
     if (Number.isFinite(patch?.fontSize)) next.fontSize = Math.max(12, Math.min(40, patch.fontSize))
     if (Number.isFinite(patch?.lineHeight)) next.lineHeight = Math.max(1.2, Math.min(3, patch.lineHeight))
     if (Object.hasOwn(COLORS, patch?.theme)) next.theme = patch.theme
-    for (const key of ['scroll', 'serif', 'keepScreenOn'])
+    for (const [key, min, max] of [
+        ['fontWeight', 100, 900], ['paragraphSpacing', 0, 3], ['pageMargin', 0, 64],
+        ['brightness', -1, 1],
+    ]) if (Number.isFinite(patch?.[key])) next[key] = Math.max(min, Math.min(max, patch[key]))
+    next.fontWeight = Math.round(next.fontWeight / 100) * 100
+    if (next.brightness < 0) next.brightness = -1
+    for (const key of ['scroll', 'serif', 'keepScreenOn', 'volumeKeys', 'animatedPage', 'showReadingStatus', 'immersive'])
         if (typeof patch?.[key] === 'boolean') next[key] = patch[key]
     return next
 }
 function updateGap() {
     if (!view || view.isFixedLayout) return
     const width = view.getBoundingClientRect().width
-    if (width > 48) view.renderer.setAttribute('gap',
-        `${2400 / (settings.scroll ? width + 24 : width)}%`)
+    // Paginator already supplies the horizontal padding through gap. Do not
+    // add body padding: in paginated flow its outer + half-column gap = margin.
+    if (width > 0) {
+        const margin = Math.min(settings.pageMargin, width / 4)
+        const gap = `${margin * 100 / (settings.scroll ? width + margin : width)}%`
+        if (view.renderer.getAttribute('gap') !== gap) view.renderer.setAttribute('gap', gap)
+    }
 }
 function applySettings() {
-    if (!view || view.isFixedLayout) return
+    if (!view) return
     const [background, foreground, link] = COLORS[settings.theme]
     const renderer = view.renderer
     document.documentElement.style.background = background
     document.body.style.background = background
+    if (view.isFixedLayout) return
     renderer.setAttribute('flow', settings.scroll ? 'scrolled' : 'paginated')
-    renderer.setAttribute('margin', '24px')
+    renderer.setAttribute('margin', `${settings.pageMargin}px`)
+    renderer.toggleAttribute('animated', settings.animatedPage)
     updateGap()
     renderer.setAttribute('max-inline-size', '100000px')
     renderer.setAttribute('max-block-size', '100000px')
@@ -200,19 +228,20 @@ function applySettings() {
             color-scheme: ${settings.theme === 'night' ? 'dark' : 'light'}; }
         body { color: inherit !important; background: transparent !important;
             font-family: ${settings.serif ? 'serif' : 'sans-serif'} !important;
+            font-weight: ${settings.fontWeight} !important;
             padding: 0 !important; box-sizing: border-box !important;
             line-height: ${settings.lineHeight} !important; }
         p, li, blockquote, dd { line-height: ${settings.lineHeight} !important; }
-        p { text-indent: 2em; margin-block: 0 .6em; }
+        p { text-indent: 2em; margin-block: 0 ${settings.paragraphSpacing}em !important; }
         a { color: ${link} !important; }
         pre { white-space: pre-wrap !important; }
     `)
 }
 
-function flatten(items = []) {
+function flatten(items = [], depth = 0) {
     return (items || []).flatMap(item => [
-        ...(typeof item.href === 'string' && item.href ? [{ label: String(item.label || ''), href: item.href }] : []),
-        ...flatten(item.subitems || []),
+        { label: String(item.label || ''), href: typeof item.href === 'string' ? item.href : '', depth },
+        ...flatten(item.subitems || [], depth + 1),
     ])
 }
 function publish() {
@@ -225,6 +254,14 @@ function publish() {
         type: 'relocate', cfi: latest.cfi,
         fraction: Number.isFinite(latest.fraction) ? Math.max(0, Math.min(1, latest.fraction)) : 0,
         chapter: String(row?.title ?? latest.tocItem?.label ?? ''), chapterId,
+        tocHref: String(latest.tocItem?.href ?? (row
+            ? `${ORIGIN}/chapter/${encodeURIComponent(String(session.book.id))}/${encodeURIComponent(String(row.id))}.xhtml`
+            : '')),
+        sectionIndex: index, sectionCount: book.sections.length,
+        // Raw paginator size is 1 / (pages - 2): the two sentinel blank
+        // pages are NOT reading pages. View's location.total is an estimate.
+        page: view.isFixedLayout ? index + 1 : pagination?.page ?? 0,
+        pageCount: view.isFixedLayout ? book.sections.length : pagination?.pageCount ?? 0,
     })
 }
 
@@ -261,7 +298,7 @@ function bindDocument(doc, owner, token) {
         const ratio = x / bounds.width
         down = null
         clickTimer = setTimeout(() => {
-            if (token !== generation || fault || selection()) return
+            if (token !== generation || selection()) return
             if (ratio < .3) commands({ type: book.dir === 'rtl' ? 'next' : 'prev' })
             else if (ratio > .7) commands({ type: book.dir === 'rtl' ? 'prev' : 'next' })
             else send({ type: 'tap' })
@@ -311,7 +348,7 @@ async function boot(target) {
     try { view?.close() } catch { /* Upstream destroy may run before its first document. */ }
     view?.remove()
     book?.destroy?.()
-    view = book = latest = undefined
+    view = book = latest = pagination = undefined
     fault = undefined
     ready = pendingLoaded = false
     controller = new AbortController()
@@ -364,12 +401,24 @@ async function boot(target) {
         bindDocument(doc, owner, token)
     })
     owner.addEventListener('relocate', ({ detail }) => {
-        if (token !== generation || fault) return
+        if (token !== generation || fault || pagination?.padding) return
         latest = detail
         if (!working) publish()
     })
     document.body.append(owner)
     await owner.open(book)
+    // Capture at renderer target before View converts section fractions into
+    // whole-book progress. No vendor patch and no estimated location counts.
+    owner.renderer.addEventListener('relocate', ({ detail }) => {
+        if (token !== generation) return
+        const { fraction, size } = detail
+        if (!view.isFixedLayout && !settings.scroll && Number.isFinite(size) && size > 0) {
+            const pageCount = Math.max(1, Math.round(1 / size))
+            const offset = Math.round(fraction / size)
+            pagination = { pageCount, page: Math.max(1, Math.min(pageCount, offset + 1)),
+                padding: offset < 0 || offset >= pageCount }
+        } else pagination = { page: 0, pageCount: 0, padding: false }
+    }, { capture: true })
     layoutObserver = new ResizeObserver(updateGap)
     layoutObserver.observe(owner)
     applySettings()
@@ -386,19 +435,39 @@ async function boot(target) {
 
 async function execute(command) {
     if (command.type === 'settings') {
-        settings = cleanSettings(command.settings)
-        if (!fault) applySettings()
+        const next = cleanSettings(command.settings)
+        const layoutChanged = ['fontSize', 'fontWeight', 'lineHeight', 'paragraphSpacing',
+            'pageMargin', 'theme', 'scroll', 'serif'].some(key => settings[key] !== next[key])
+        const animationChanged = settings.animatedPage !== next.animatedPage
+        settings = next
+        if (!fault && layoutChanged) applySettings()
+        else if (animationChanged) view?.renderer?.toggleAttribute('animated', settings.animatedPage)
         return
     }
     if (command.type === 'retry') {
         await boot(retryTarget)
         return
     }
-    if (fault || !ready) return
+    if (!ready) return
+    if (fault) {
+        // A failed next chapter must not trap the reader or block the menu.
+        // Restore the last readable anchor before honoring a different action.
+        const anchor = latest?.cfi
+        if (!anchor) return
+        fault = undefined
+        await go(anchor)
+        pendingLoaded = true
+    }
     await sleep(Math.max(0, touchUntil - performance.now()))
     if (command.type === 'goto') {
         if (typeof command.href !== 'string' || !command.href) throw new Error('无效的章节链接')
         await go(command.href)
+    } else if (command.type === 'section') {
+        if (command.delta !== -1 && command.delta !== 1) return
+        let index = (latest?.section?.current ?? view.resolveCFI(latest.cfi)?.index) + command.delta
+        while (index >= 0 && index < book.sections.length && book.sections[index].linear === 'no')
+            index += command.delta
+        if (index >= 0 && index < book.sections.length) await go(index)
     } else if (command.type === 'fraction') {
         if (!Number.isFinite(command.fraction)) throw new Error('无效的阅读进度')
         await go({ fraction: Math.max(0, Math.min(1, command.fraction)) })
@@ -411,9 +480,9 @@ async function execute(command) {
     publish()
 }
 function commands(command) {
-    if (!command || !['next', 'prev', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
+    if (!command || !['next', 'prev', 'section', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
         return Promise.resolve()
-    const turn = command.type === 'next' || command.type === 'prev'
+    const turn = command.type === 'next' || command.type === 'prev' || command.type === 'section'
     if (turn && turnQueued) return serial
     if (turn) turnQueued = true
     serial = serial.then(async () => {

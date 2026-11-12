@@ -9,6 +9,7 @@ import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,12 +29,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val messages = mutableMessages.asSharedFlow()
     private var catalogJob: Job? = null
     private var detailJob: Job? = null
+    private var enrichmentJob: Job? = null
     private var downloadJob: Job? = null
     private var downloadBookId: String? = null
+    private var downloadDone = 0
+    private var downloadTotal = 0
 
     init {
         viewModelScope.launch {
-            try { app.library.load() } catch (_: Exception) { mutableMessages.emit("书架读取失败") }
+            try { app.library.load() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Library load deferred", failure) }
         }
         loadCatalog()
     }
@@ -51,6 +57,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadCatalog(more: Boolean = false) {
         if (more && (catalog.value.loading || !catalog.value.hasMore)) return
         catalogJob?.cancel()
+        enrichmentJob?.cancel()
         val request = catalog.value
         val page = if (more) request.page + 1 else 1
         catalogJob = viewModelScope.launch {
@@ -58,10 +65,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = app.repository.catalog(request.order, page, request.query)
                 ensureActive()
+                val combined = (if (more) request.books + result.books else result.books).distinctBy { it.id }
                 mutableCatalog.value = request.copy(
-                    books = (if (more) request.books + result.books else result.books).distinctBy { it.id },
-                    loading = false, error = null, page = page, hasMore = result.hasMore,
+                    books = combined, loading = false, error = null, page = page,
+                    hasMore = result.hasMore && (!more || result.books.any { book -> request.books.none { it.id == book.id } }),
                 )
+                app.prefetchCovers(result.books)
+                enrichmentJob = viewModelScope.launch {
+                    coroutineScope {
+                        combined.filter { it.author.isBlank() }.forEach { book ->
+                            launch {
+                                try {
+                                    val enriched = app.repository.metadata(book)
+                                    mutableCatalog.update { current ->
+                                        if (current.query != request.query || current.order != request.order) current
+                                        else current.copy(books = current.books.map { if (it.id == book.id) enriched else it })
+                                    }
+                                } catch (cancelled: CancellationException) { throw cancelled }
+                                catch (_: Exception) { /* Optional metadata must not block the book list. */ }
+                            }
+                        }
+                    }
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
                 mutableCatalog.update { it.copy(loading = false, error = "连接失败") }
@@ -76,7 +101,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = app.repository.detail(book)
                 ensureActive()
-                mutableDetail.value = DetailState(result.book, detail = result, loading = false)
+                val downloading = downloadBookId == book.id && downloadJob?.isActive == true
+                mutableDetail.value = DetailState(result.book, detail = result, loading = false,
+                    downloading = downloading, downloaded = if (downloading) downloadDone else 0,
+                    total = if (downloading) downloadTotal else 0)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { mutableDetail.value = DetailState(book, loading = false, error = "连接失败") }
         }
@@ -88,13 +116,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val existing = library.value.entries.find { it.book.id == book.id }
             if (existing == null) app.library.add(book)
             else app.library.favorite(book.id, !existing.favorite)
-        } catch (_: Exception) { mutableMessages.emit("保存失败") }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Bookmark write deferred", failure) }
+    }
+
+    fun toggleFavorite(entry: ShelfEntry) = viewModelScope.launch {
+        try { app.library.favorite(entry.book.id, !entry.favorite) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Bookmark write deferred", failure) }
     }
 
     suspend fun prepareRead(book: Book): Boolean = try {
-        app.library.add(book, favorite = false)
+        val existing = library.value.entries.find { it.book.id == book.id }
+        app.library.add(book, favorite = existing?.favorite ?: true)
         true
-    } catch (_: Exception) { mutableMessages.emit("保存失败"); false }
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Cannot prepare book", failure); false }
 
     fun importBook(uri: Uri) = viewModelScope.launch {
         mutableMessages.emit("正在导入")
@@ -121,20 +158,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun settings(settings: ReaderSettings) = viewModelScope.launch {
         try { app.library.settings(settings) }
-        catch (_: Exception) { mutableMessages.emit("保存失败") }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Settings write deferred", failure) }
     }
 
     fun download() {
         val detail = detail.value?.detail ?: return
-        if (downloadJob?.isActive == true) return
+        if (downloadJob?.isActive == true) { mutableMessages.tryEmit("正在缓存"); return }
         downloadBookId = detail.book.id
+        downloadDone = 0
+        downloadTotal = detail.chapters.size
         downloadJob = viewModelScope.launch {
             try {
                 app.library.add(detail.book)
                 mutableDetail.update { it?.copy(downloading = true, downloaded = 0, total = detail.chapters.size) }
                 detail.chapters.forEachIndexed { index, chapter ->
                     ensureActive()
-                    app.repository.chapterXhtml(detail.book.id, chapter)
+                    app.repository.cacheChapter(detail.book.id, chapter)
+                    downloadDone = index + 1
                     if (mutableDetail.value?.book?.id == detail.book.id) {
                         mutableDetail.update { it?.copy(downloaded = index + 1) }
                     }

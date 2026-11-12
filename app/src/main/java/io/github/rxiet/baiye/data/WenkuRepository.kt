@@ -8,9 +8,13 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -32,13 +36,16 @@ import org.jsoup.nodes.TextNode
 import org.jsoup.parser.Parser
 
 /** Anonymous requests only. No user cookies, account tokens or bundled APK binaries. */
-class WenkuRepository(context: Context) {
+class WenkuRepository(context: Context, baseClient: OkHttpClient) {
     private val folder = File(context.filesDir, "wenku").apply { mkdirs() }
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val locks = ConcurrentHashMap<String, Mutex>()
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS)
-        .callTimeout(40, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
+    private val client = baseClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    private val metadataSlots = Semaphore(3)
+    private val imageLocks = ConcurrentHashMap<String, Any>()
+    private val imageMemory = object : android.util.LruCache<String, Pair<ByteArray, String>>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Pair<ByteArray, String>): Int = value.first.size
+    }
     private val searches = ConcurrentHashMap<String, List<Book>>()
 
     suspend fun catalog(order: CatalogOrder, page: Int, query: String = ""): CatalogPage = withContext(Dispatchers.IO) {
@@ -46,11 +53,37 @@ class WenkuRepository(context: Context) {
         val cache = File(folder, "catalog-${hash("${order.value}:$page:$query")}.json")
         try {
             val result = try { apiCatalog(order, page, query) } catch (_: IOException) { webCatalog(order, page, query) }
-            atomic(cache, json.encodeToString(result))
-            result
-        } catch (error: Exception) {
+            cacheText(cache, json.encodeToString(result))
+            result.copy(books = result.books.map(::cachedSummary))
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
             if (!cache.isFile) throw error
-            json.decodeFromString<CatalogPage>(cache.readText())
+            val saved = json.decodeFromString<CatalogPage>(cache.readText())
+            saved.copy(books = saved.books.map(::cachedSummary))
+        }
+    }
+
+    private fun cachedSummary(book: Book): Book {
+        val cached = readDetail(book.id)?.book ?: runCatching {
+            json.decodeFromString<Book>(File(folder, "meta-${book.id}.json").readText())
+        }.getOrNull() ?: return book
+        return book.copy(
+            title = book.title.ifBlank { cached.title }, author = cached.author,
+            cover = book.cover.ifBlank { cached.cover }, status = cached.status,
+        )
+    }
+
+    suspend fun metadata(book: Book): Book = withContext(Dispatchers.IO) {
+        if (book.local || book.author.isNotBlank()) return@withContext book
+        requireId(book.id)
+        locks.getOrPut("meta/${book.id}") { Mutex() }.withLock {
+            val cached = cachedSummary(book)
+            if (cached.author.isNotBlank()) return@withLock cached
+            metadataSlots.withPermit {
+                val result = WenkuParser.meta(book.id, api("action=book&do=meta&aid=${book.id}&t=0"), "")
+                cacheText(File(folder, "meta-${book.id}.json"), json.encodeToString(result))
+                result.copy(title = book.title.ifBlank { result.title })
+            }
         }
     }
 
@@ -69,14 +102,8 @@ class WenkuRepository(context: Context) {
             books = parsed.first
             hasMore = page < parsed.second
         }
-        val enriched = books.map { book ->
-            if (book.title.isNotBlank()) book else {
-                val cache = readDetail(book.id)
-                if (cache != null) cache.book else {
-                    delay(100)
-                    WenkuParser.meta(book.id, api("action=book&do=meta&aid=${book.id}&t=0"), "")
-                }
-            }
+        val enriched = coroutineScope {
+            books.map { book -> async { if (book.title.isNotBlank()) cachedSummary(book) else metadata(book) } }.awaitAll()
         }
         return CatalogPage(enriched, hasMore)
     }
@@ -88,15 +115,18 @@ class WenkuRepository(context: Context) {
         if (cached != null && System.currentTimeMillis() - cache.lastModified() < 30 * 60 * 1000) return@withContext cached
         try {
             val result = try {
-                val meta = api("action=book&do=meta&aid=${book.id}&t=0")
-                val intro = api("action=book&do=intro&aid=${book.id}&t=0")
-                val toc = api("action=book&do=list&aid=${book.id}&t=0")
-                BookDetail(WenkuParser.meta(book.id, meta, intro), WenkuParser.toc(toc))
+                coroutineScope {
+                    val meta = async { api("action=book&do=meta&aid=${book.id}&t=0") }
+                    val intro = async { api("action=book&do=intro&aid=${book.id}&t=0") }
+                    val toc = async { api("action=book&do=list&aid=${book.id}&t=0") }
+                    BookDetail(WenkuParser.meta(book.id, meta.await(), intro.await()), WenkuParser.toc(toc.await()))
+                }
             } catch (_: IOException) { webDetail(book) }
             require(result.chapters.isNotEmpty()) { "没有可用章节" }
-            atomic(cache, json.encodeToString(result))
+            cacheText(cache, json.encodeToString(result))
             result
-        } catch (error: Exception) { cached ?: throw error }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) { cached ?: throw error }
     }
 
     suspend fun chapterXhtml(bookId: String, chapter: Chapter): String = withContext(Dispatchers.IO) {
@@ -120,24 +150,41 @@ class WenkuRepository(context: Context) {
             }
             if (raw.isBlank()) throw IOException("没有可用正文")
             val html = WenkuParser.chapter(chapter.title, raw)
-            atomic(file, html)
+            cacheText(file, html)
             html
         }
     }
 
-    fun image(key: String): Pair<ByteArray, String> {
+    fun image(key: String, requireStored: Boolean = false): Pair<ByteArray, String> {
         require(key.length < 4096)
-        val url = String(Base64.getUrlDecoder().decode(key), Charsets.UTF_8)
-        val safe = imageUrl(url)
+        val safe = imageUrl(String(Base64.getUrlDecoder().decode(key), Charsets.UTF_8))
         val name = hash(safe)
         val cache = File(File(folder, "images").apply { mkdirs() }, name)
-        if (cache.isFile) return cache.readBytes().let { it to imageMime(it) }
-        val bytes = bytes(Request.Builder().url(safe).build(), 16 * 1024 * 1024)
-        val mime = imageMime(bytes)
-        val atomic = AtomicFile(cache)
-        val out = atomic.startWrite()
-        try { out.write(bytes); atomic.finishWrite(out) } catch (error: Exception) { atomic.failWrite(out); throw error }
-        return bytes to mime
+        synchronized(imageLocks.getOrPut(name) { Any() }) {
+            imageMemory.get(name)?.let { if (!requireStored || cache.isFile) return it }
+            if (cache.isFile) return cache.readBytes().let { data ->
+                (data to imageMime(data)).also { imageMemory.put(name, it) }
+            }
+            val data = imageMemory.get(name)?.first ?: bytes(Request.Builder().url(safe).build(), 16 * 1024 * 1024)
+            val result = data to imageMime(data)
+            imageMemory.put(name, result)
+            val atomic = AtomicFile(cache)
+            var output: java.io.FileOutputStream? = null
+            try {
+                output = atomic.startWrite(); output.write(data); atomic.finishWrite(output)
+            } catch (error: IOException) {
+                if (output != null) atomic.failWrite(output)
+                if (requireStored) throw error
+            }
+            return result
+        }
+    }
+
+    suspend fun cacheChapter(bookId: String, chapter: Chapter) = withContext(Dispatchers.IO) {
+        val html = chapterXhtml(bookId, chapter)
+        if (!File(File(folder, bookId), "${chapter.id}.xhtml").isFile) throw IOException("无法写入缓存")
+        val keys = Jsoup.parse(html).select("img[src]").map { it.attr("src").substringAfter("/image/", "") }.filter { it.isNotEmpty() }.distinct()
+        coroutineScope { keys.chunked(2).forEach { group -> group.map { key -> async { image(key, requireStored = true) } }.awaitAll() } }
     }
 
     private fun imageMime(bytes: ByteArray): String = when {
@@ -247,6 +294,11 @@ class WenkuRepository(context: Context) {
         if (chapters.isEmpty()) throw IOException("没有可用目录")
         return BookDetail(book.copy(title = title, author = author.ifBlank { book.author },
             description = intro, cover = coverUrl(book.id)), chapters.distinctBy { it.id })
+    }
+
+    private fun cacheText(file: File, text: String) {
+        try { atomic(file, text) }
+        catch (failure: IOException) { android.util.Log.w("BaiyeNetwork", "Optional cache write deferred", failure) }
     }
 
     private fun atomic(file: File, text: String) {

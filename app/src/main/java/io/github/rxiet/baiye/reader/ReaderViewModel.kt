@@ -11,6 +11,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -28,20 +32,25 @@ data class ReaderManifest(
 )
 
 data class ReaderDocument(val entry: ShelfEntry, val manifest: ReaderManifest)
-data class ReaderToc(val label: String, val href: String)
+data class ReaderToc(val label: String, val href: String, val depth: Int = 0)
 
 class ReaderViewModel(application: Application, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
     val app = application as BaiyeApplication
     val library = app.library.state
+    val readerSettings = library.map { it.settings }.distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), library.value.settings)
     private val mutableDocument = MutableStateFlow<ReaderDocument?>(null)
     val document = mutableDocument.asStateFlow()
     val error = MutableStateFlow<String?>(null)
     val toc = MutableStateFlow<List<ReaderToc>>(emptyList())
     val ready = MutableStateFlow(false)
+    val fixedLayout = MutableStateFlow(false)
     val progress = MutableStateFlow(ReadingProgress())
     private var pendingProgress: ReadingProgress? = null
     private var saveJob: Job? = null
     private var loadJob: Job? = null
+    private var prefetchJob: Job? = null
+    private var prefetchedAfter: String? = null
     @Volatile private var startConsumed = savedState.get<Boolean>("chapterConsumed") ?: false
 
     init { load() }
@@ -91,16 +100,29 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
 
     fun record(value: ReadingProgress) {
         if (!ready.value || error.value != null || value.cfi.isBlank() || !value.fraction.isFinite()) return
+        if (value == progress.value && pendingProgress != null) return
         progress.value = value
+        val active = document.value
+        if (active != null && !active.entry.book.local && prefetchedAfter != value.chapterId) {
+            prefetchedAfter = value.chapterId
+            val next = active.manifest.chapters.getOrNull(value.sectionIndex + 1)
+            prefetchJob?.cancel()
+            if (next != null) prefetchJob = app.ioScope.launch {
+                try { app.repository.chapterXhtml(active.entry.book.id, next) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Speculative loading must never affect the current page. */ }
+            }
+        }
         pendingProgress = value
         saveJob?.cancel()
-        saveJob = app.ioScope.launch { delay(350); saveProgress(value) }
+        saveJob = app.ioScope.launch { delay(1200); saveProgress(value) }
     }
 
     private suspend fun saveProgress(value: ReadingProgress) {
         val id = document.value?.entry?.book?.id ?: return
         try { app.library.progress(id, value) }
-        catch (_: Exception) { error.value = "进度保存失败" }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { android.util.Log.w("BaiyeReader", "Progress remains in memory", failure) }
     }
 
     fun flushProgress() {
@@ -109,8 +131,14 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         saveJob = app.ioScope.launch { saveProgress(value) }
     }
 
+    override fun onCleared() {
+        prefetchJob?.cancel()
+        super.onCleared()
+    }
+
     fun settings(value: ReaderSettings) = viewModelScope.launch {
         try { app.library.settings(value) }
-        catch (_: Exception) { error.value = "设置保存失败" }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { android.util.Log.w("BaiyeReader", "Settings remain in memory", failure) }
     }
 }

@@ -2,6 +2,31 @@ package io.github.rxiet.baiye.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.material.icons.filled.Refresh
+import io.github.rxiet.baiye.data.ReadingProgress
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,7 +72,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -63,6 +87,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import io.github.rxiet.baiye.data.Book
 import io.github.rxiet.baiye.data.CatalogOrder
 import io.github.rxiet.baiye.data.CatalogState
@@ -90,15 +116,50 @@ fun CatalogScreen(
     onMore: () -> Unit,
     onRetry: () -> Unit,
     onSettings: () -> Unit,
+    onRefresh: () -> Unit = {},
 ) {
-    var search by rememberSaveable { mutableStateOf(state.query) }
+    var search by rememberSaveable(state.query) { mutableStateOf(state.query) }
+    val gridState = rememberSaveable(state.order, state.query, saver = LazyGridState.Saver) { LazyGridState() }
+    val currentState by rememberUpdatedState(state)
+    val currentOnMore by rememberUpdatedState(onMore)
+    val scope = rememberCoroutineScope()
+    var refreshVersion by remember(state.order, state.query) { mutableStateOf(0) }
+    LaunchedEffect(gridState, refreshVersion) {
+        var requested: Pair<Int, String?>? = null
+        snapshotFlow {
+            val latest = currentState
+            val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val nearEnd = last >= (latest.books.size - 6).coerceAtLeast(0)
+            Triple(nearEnd, latest, gridState.layoutInfo.totalItemsCount)
+        }.collect { (nearEnd, latest, _) ->
+            val token = latest.books.size to latest.books.lastOrNull()?.id
+            if (nearEnd && !latest.loading && latest.hasMore && latest.error == null &&
+                latest.books.isNotEmpty() && requested != token
+            ) {
+                requested = token
+                currentOnMore()
+            }
+        }
+    }
     val keyboard = LocalSoftwareKeyboardController.current
     val submit = {
         keyboard?.hide()
         onSearch(search.trim())
     }
     Column(Modifier.fillMaxSize().background(Color.White)) {
-        MainHeading("文库") { SettingsAction(onSettings) }
+        MainHeading("文库") {
+            IconButton(
+                onClick = {
+                    scope.launch {
+                        gridState.animateScrollToItem(0)
+                        onRefresh()
+                        refreshVersion += 1
+                    }
+                },
+                modifier = Modifier.size(48.dp),
+            ) { Icon(Icons.Default.Refresh, contentDescription = "刷新", tint = Ink) }
+            SettingsAction(onSettings)
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 24.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -128,13 +189,16 @@ fun CatalogScreen(
         )
         LazyVerticalGrid(
             columns = GridCells.Adaptive(105.dp),
+            state = gridState,
             modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 112.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            items(state.books) { book ->
-                BookTile(book = book, onClick = { onBook(book) })
+            items(state.books, key = { it.id }) { book ->
+                BookTile(book = book, onClick = { onBook(book) }, modifier = Modifier.animateItem(
+                    fadeInSpec = tween(180), placementSpec = tween(220), fadeOutSpec = tween(120),
+                ))
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(
@@ -142,19 +206,15 @@ fun CatalogScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    if (state.loading) StatusLabel("加载中")
+                    if (state.loading) {
+                        Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(size = 24.dp)
+                        }
+                    }
                     if (state.error != null) FailureState("连接失败", onRetry)
                     if (state.books.isEmpty() && !state.loading && state.error == null) {
                         StatusLabel("暂无书籍")
                         ActionButton("重试", onRetry)
-                    }
-                    if (state.books.isNotEmpty() && state.hasMore && state.error == null) {
-                        ActionButton(
-                            label = "加载更多",
-                            onClick = onMore,
-                            enabled = !state.loading,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
                     }
                 }
             }
@@ -170,11 +230,16 @@ fun ShelfScreen(
     onSettings: () -> Unit,
     onBrowse: () -> Unit,
     onRemove: (ShelfEntry) -> Unit,
+    onDetails: (ShelfEntry) -> Unit = {},
+    onFavorite: (ShelfEntry) -> Unit = {},
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var confirmDelete by rememberSaveable(selectedId) { mutableStateOf(false) }
+    val favoritesGrid = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
+    val recentGrid = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     val visible = remember(entries, tab) {
-        if (tab == 0) entries.filter { it.favorite }
+        if (tab == 0) entries.filter { it.favorite }.sortedByDescending { maxOf(it.lastReadAt, it.addedAt) }
         else entries.filter { it.lastReadAt > 0 }.sortedByDescending { it.lastReadAt }
     }
     val selectedEntry = entries.firstOrNull { it.book.id == selectedId }
@@ -204,16 +269,21 @@ fun ShelfScreen(
         } else {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(105.dp),
+                state = if (tab == 0) favoritesGrid else recentGrid,
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 24.dp),
+                contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 112.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
-                items(visible) { entry ->
+                items(visible, key = { it.book.id }) { entry ->
                     BookTile(
                         book = entry.book,
                         onClick = { onBook(entry) },
                         onLongClick = { selectedId = entry.book.id },
+                        progress = entry.progress.takeIf { entry.lastReadAt > 0 },
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(180), placementSpec = tween(220), fadeOutSpec = tween(120),
+                        ),
                     )
                 }
             }
@@ -223,21 +293,39 @@ fun ShelfScreen(
         Dialog(onDismissRequest = { selectedId = null }) {
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
-                    .background(Color.White).padding(24.dp),
+                    .background(Color.White).verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                Text("删除书籍", fontSize = 26.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                Text(selectedEntry.book.title, fontSize = 18.sp, color = Ink)
-                ActionButton(
-                    "删除",
-                    onClick = {
-                        selectedId = null
-                        onRemove(selectedEntry)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    primary = true,
-                )
-                ActionButton("取消", { selectedId = null }, Modifier.fillMaxWidth())
+                Text(if (confirmDelete) "删除书籍" else selectedEntry.book.title,
+                    fontSize = 24.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                if (confirmDelete) {
+                    Text(selectedEntry.book.title, fontSize = 17.sp, color = Ink)
+                    TextButton(
+                        text = "删除书籍",
+                        onClick = { selectedId = null; onRemove(selectedEntry) },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(color = Color(0xFFFCEBE9), textColor = Color(0xFFB3261E)),
+                    )
+                    PlainTextButton("取消", { confirmDelete = false }, Modifier.fillMaxWidth())
+                } else {
+                    ActionButton("阅读", { selectedId = null; onBook(selectedEntry) },
+                        Modifier.fillMaxWidth(), primary = true)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (!selectedEntry.book.local) {
+                            PlainTextButton("书籍", { selectedId = null; onDetails(selectedEntry) }, Modifier.weight(1f))
+                        }
+                        PlainTextButton(if (selectedEntry.favorite) "移出书架" else "加入书架",
+                            { selectedId = null; onFavorite(selectedEntry) }, Modifier.weight(1f))
+                    }
+                    Rule()
+                    TextButton(
+                        text = "删除书籍",
+                        onClick = { confirmDelete = true },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = Color(0xFFB3261E)),
+                    )
+                    PlainTextButton("取消", { selectedId = null }, Modifier.fillMaxWidth())
+                }
             }
         }
     }
@@ -253,6 +341,7 @@ fun DetailScreen(
     onRetry: () -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
+    progress: ReadingProgress? = null,
 ) {
     val detail = state.detail
     val book = detail?.book ?: state.book
@@ -274,8 +363,9 @@ fun DetailScreen(
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(book.title, fontSize = 26.sp, lineHeight = 34.sp, color = Ink,
                             fontWeight = FontWeight.SemiBold)
-                        if (book.author.isNotBlank()) Text(book.author, fontSize = 17.sp, color = Ink)
-                        if (book.status.isNotBlank()) Text(book.status, fontSize = 17.sp, color = Muted)
+                        if (book.author.isNotBlank()) Text(book.author, fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium, color = Ink)
+                        if (book.status.isNotBlank()) Text(book.status, fontSize = 14.sp, color = Muted)
                     }
                 }
             }
@@ -293,7 +383,7 @@ fun DetailScreen(
                 }
                 if (book.description.isNotBlank()) {
                     item {
-                        Column {
+                        Column(Modifier.animateContentSize(animationSpec = tween(220))) {
                             Rule()
                             Spacer(Modifier.height(20.dp))
                             Text(
@@ -311,21 +401,22 @@ fun DetailScreen(
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (detail.chapters.isNotEmpty()) {
-                            ActionButton("开始阅读", { onRead(null) }, Modifier.fillMaxWidth(), primary = true)
+                            ActionButton(if (!progress?.cfi.isNullOrBlank()) "继续阅读" else "阅读",
+                                { onRead(null) }, Modifier.fillMaxWidth(), primary = true)
                         }
-                        ActionButton(
-                            if (favorite) "取消收藏" else "收藏",
-                            onFavorite,
-                            Modifier.fillMaxWidth(),
-                        )
-                        ActionButton(
-                            if (state.downloading) "取消缓存" else "缓存",
-                            if (state.downloading) onCancelDownload else onDownload,
-                            Modifier.fillMaxWidth(),
-                            enabled = state.downloading || detail.chapters.isNotEmpty(),
-                        )
-                        if (state.downloading) {
-                            Text("缓存 ${state.downloaded} / ${state.total}", fontSize = 17.sp, color = Ink)
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ActionButton(
+                                if (favorite) "取消收藏" else "收藏", onFavorite, Modifier.weight(1f),
+                            )
+                            ActionButton(
+                                if (state.downloading) "取消缓存" else "缓存",
+                                if (state.downloading) onCancelDownload else onDownload,
+                                Modifier.weight(1f),
+                                enabled = state.downloading || detail.chapters.isNotEmpty(),
+                            )
+                        }
+                        if (state.downloading || state.total > 0) {
+                            Text("缓存 ${state.downloaded} / ${state.total}", fontSize = 14.sp, color = Muted)
                         }
                     }
                 }
@@ -347,14 +438,16 @@ fun DetailScreen(
                                 fontWeight = FontWeight.SemiBold, color = Ink)
                         }
                     }
-                    items(chapters) { chapter ->
+                    items(chapters, key = { it.id }) { chapter ->
                         Column(
                             Modifier.fillMaxWidth()
                                 .clickable(role = Role.Button) { onRead(chapter) },
                         ) {
                             Text(chapter.title,
                                 Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 12.dp),
-                                fontSize = 18.sp, lineHeight = 28.sp, color = Ink)
+                                fontSize = 17.sp, lineHeight = 28.sp,
+                                fontWeight = if (chapter.id == progress?.chapterId) FontWeight.Medium else FontWeight.Normal,
+                                color = if (chapter.id == progress?.chapterId) Accent else Ink)
                             Rule()
                         }
                     }
@@ -371,81 +464,216 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onLicenses: () -> Unit,
 ) {
-    var fontSize by remember(settings.fontSize) { mutableStateOf(settings.fontSize.toFloat().coerceIn(16f, 32f)) }
-    var lineHeight by remember(settings.lineHeight) { mutableStateOf(settings.lineHeight.toFloat().coerceIn(1.3f, 2.4f)) }
     Column(Modifier.fillMaxSize().background(Color.White)) {
         Header("设置", onBack)
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(24.dp),
-            verticalArrangement = Arrangement.spacedBy(28.dp),
+        PreferencesContent(settings, onChange, "all", Modifier.weight(1f), onLicenses)
+    }
+}
+
+@Composable
+fun ReadingPreferences(
+    settings: ReaderSettings,
+    onChange: (ReaderSettings) -> Unit,
+    section: String = "type",
+) {
+    PreferencesContent(settings, onChange, section, Modifier.fillMaxSize())
+}
+
+@Composable
+private fun PreferencesContent(
+    settings: ReaderSettings,
+    onChange: (ReaderSettings) -> Unit,
+    section: String,
+    modifier: Modifier,
+    onLicenses: (() -> Unit)? = null,
+) {
+    val latest by rememberUpdatedState(settings)
+    val change by rememberUpdatedState(onChange)
+    var fontSize by remember(settings.fontSize) { mutableStateOf(settings.fontSize.toFloat()) }
+    var fontWeight by remember(settings.fontWeight) { mutableStateOf(settings.fontWeight.toFloat()) }
+    var lineHeight by remember(settings.lineHeight) { mutableStateOf(settings.lineHeight.toFloat()) }
+    var paragraphSpacing by remember(settings.paragraphSpacing) { mutableStateOf(settings.paragraphSpacing.toFloat()) }
+    var pageMargin by remember(settings.pageMargin) { mutableStateOf(settings.pageMargin.toFloat()) }
+    var brightness by remember(settings.brightness) { mutableStateOf(settings.brightness.takeIf { it >= 0f } ?: .5f) }
+    val preview = settings.copy(
+        fontSize = fontSize.roundToInt().coerceIn(16, 32),
+        fontWeight = ((fontWeight / 100).roundToInt() * 100).coerceIn(300, 700),
+        lineHeight = lineHeight.toDouble(),
+        paragraphSpacing = paragraphSpacing.toDouble(),
+        pageMargin = pageMargin.roundToInt(),
+    )
+    LazyColumn(
+        modifier = modifier,
+        contentPadding = PaddingValues(24.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        if (section == "type" || section == "all") {
+            item(key = "preview") { ReadingPreview(preview) }
+            item(key = "type") {
+                PreferenceGroup("文字") {
+                    PreferenceSlider("字号", fontSize, fontSize.roundToInt().toString(), 16f..32f, 15,
+                        { fontSize = it }) { change(latest.copy(fontSize = fontSize.roundToInt().coerceIn(16, 32))) }
+                    PreferenceSlider("字重", fontWeight, ((fontWeight / 100).roundToInt() * 100).toString(), 300f..700f, 3,
+                        { fontWeight = it }) {
+                        change(latest.copy(fontWeight = ((fontWeight / 100).roundToInt() * 100).coerceIn(300, 700)))
+                    }
+                    SettingChoices("字体", listOf("宋体", "黑体"), if (settings.serif) 0 else 1) {
+                        change(latest.copy(serif = it == 0))
+                    }
+                    PreferenceSlider("行距", lineHeight, decimalValue(lineHeight), 1.3f..2.4f, 10,
+                        { lineHeight = it }) { change(latest.copy(lineHeight = decimalValue(lineHeight).toDouble())) }
+                    PreferenceSlider("段距", paragraphSpacing, decimalValue(paragraphSpacing), 0f..1.6f, 15,
+                        { paragraphSpacing = it }) {
+                        change(latest.copy(paragraphSpacing = decimalValue(paragraphSpacing).toDouble()))
+                    }
+                    PreferenceSlider("页边距", pageMargin, ((pageMargin / 2).roundToInt() * 2).toString(), 12f..40f, 13,
+                        { pageMargin = it }) {
+                        change(latest.copy(pageMargin = ((pageMargin / 2).roundToInt() * 2).coerceIn(12, 40)))
+                    }
+                }
+            }
+        }
+        if (section == "background" || section == "all") {
+            item(key = "background") {
+                PreferenceGroup("版面") {
+                    BackgroundChoices(settings.theme) { change(latest.copy(theme = it)) }
+                    PreferenceSwitch("跟随系统亮度", settings.brightness < 0f) {
+                        change(latest.copy(brightness = if (it) -1f else brightness.coerceIn(.1f, 1f)))
+                    }
+                    if (settings.brightness >= 0f) {
+                        PreferenceSlider("亮度", brightness, "${(brightness * 100).roundToInt()}%", .1f..1f, 0,
+                            { brightness = it }) { change(latest.copy(brightness = brightness.coerceIn(.1f, 1f))) }
+                    }
+                }
+            }
+        }
+        if (section == "more" || section == "all") {
+            item(key = "more") {
+                PreferenceGroup("阅读") {
+                    SettingChoices("翻页", listOf("横向", "滚动"), if (settings.scroll) 1 else 0) {
+                        change(latest.copy(scroll = it == 1))
+                    }
+                    PreferenceSwitch("音量键翻页", settings.volumeKeys) { change(latest.copy(volumeKeys = it)) }
+                    PreferenceSwitch("翻页动画", settings.animatedPage) { change(latest.copy(animatedPage = it)) }
+                    PreferenceSwitch("保持亮屏", settings.keepScreenOn) { change(latest.copy(keepScreenOn = it)) }
+                    PreferenceSwitch("阅读状态", settings.showReadingStatus) { change(latest.copy(showReadingStatus = it)) }
+                    PreferenceSwitch("全屏阅读", settings.immersive) { change(latest.copy(immersive = it)) }
+                }
+            }
+        }
+        if (onLicenses != null) {
+            item(key = "licenses") { PlainTextButton("开源许可", onLicenses, Modifier.fillMaxWidth()) }
+        }
+    }
+}
+
+private fun decimalValue(value: Float): String = ((value * 10).roundToInt() / 10.0).toString()
+
+private fun readingBackground(theme: String): Color = when (theme) {
+    "paper" -> Color(0xFFF6F1E7)
+    "green" -> Color(0xFFE3EDDF)
+    "night" -> Color(0xFF171717)
+    else -> Color.White
+}
+
+@Composable
+private fun ReadingPreview(settings: ReaderSettings) {
+    val foreground = when (settings.theme) {
+        "night" -> Color(0xFFDEDAD2)
+        "green" -> Color(0xFF243427)
+        "paper" -> Color(0xFF24211D)
+        else -> Color(0xFF202020)
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.defaultColors(color = readingBackground(settings.theme), contentColor = foreground),
+        insideMargin = PaddingValues(horizontal = settings.pageMargin.dp, vertical = 20.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy((settings.fontSize * settings.paragraphSpacing).dp)) {
+            listOf("风穿过书页，故事继续。", "翻开下一页，远方也近了一些。").forEach { sentence ->
+                Text(sentence, fontSize = settings.fontSize.sp,
+                    fontWeight = FontWeight(settings.fontWeight.coerceIn(300, 700)),
+                    fontFamily = if (settings.serif) FontFamily.Serif else FontFamily.SansSerif,
+                    lineHeight = (settings.fontSize * settings.lineHeight).sp, color = foreground)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreferenceGroup(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(title, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = MiuixTheme.colorScheme.onSurface)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            insideMargin = PaddingValues(16.dp),
+            colors = CardDefaults.defaultColors(
+                color = if (MiuixTheme.colorScheme.background.luminance() < .5f) Color(0xFF303030) else Soft,
+                contentColor = MiuixTheme.colorScheme.onSurface),
         ) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SettingValue("字号", fontSize.roundToInt().toString())
-                    Slider(
-                        value = fontSize,
-                        onValueChange = { fontSize = it },
-                        onValueChangeFinished = {
-                            onChange(settings.copy(fontSize = fontSize.roundToInt().coerceIn(16, 32)))
-                        },
-                        valueRange = 16f..32f,
-                        steps = 15,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .semantics { contentDescription = "字号" },
-                    )
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) { content() }
+        }
+    }
+}
+
+@Composable
+private fun PreferenceSlider(
+    title: String,
+    value: Float,
+    displayValue: String,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValue: (Float) -> Unit,
+    onFinish: () -> Unit,
+) {
+    Column {
+        SettingValue(title, displayValue)
+        Slider(value = value, onValueChange = onValue, onValueChangeFinished = onFinish,
+            valueRange = range, steps = steps,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = title })
+    }
+}
+
+@Composable
+private fun PreferenceSwitch(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .clickable(role = Role.Switch) { onChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text(title, Modifier.weight(1f), fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
+        Switch(checked = checked, onCheckedChange = onChange,
+            modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = title })
+    }
+}
+
+@Composable
+private fun BackgroundChoices(selectedTheme: String, onSelect: (String) -> Unit) {
+    val themes = listOf("white" to "白色", "paper" to "纸色", "green" to "护眼", "night" to "夜间")
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("背景", fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
+        themes.chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                pair.forEach { (theme, label) ->
+                    val active = theme == selectedTheme
+                    Row(
+                        Modifier.weight(1f).heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
+                            .background(readingBackground(theme))
+                            .border(if (active) 2.dp else 1.dp, if (active) Accent else Line, RoundedCornerShape(12.dp))
+                            .semantics { selected = active }
+                            .clickable(role = Role.RadioButton) { onSelect(theme) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        val foreground = if (theme == "night") Color(0xFFE0DDD5) else Ink
+                        Text(label, fontSize = 16.sp, fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                            color = foreground)
+                        if (active) Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Accent))
+                    }
                 }
             }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SettingValue("行距", ((lineHeight * 10).roundToInt() / 10.0).toString())
-                    Slider(
-                        value = lineHeight,
-                        onValueChange = { lineHeight = it },
-                        onValueChangeFinished = {
-                            val value = ((lineHeight * 10).roundToInt() / 10.0).coerceIn(1.3, 2.4)
-                            onChange(settings.copy(lineHeight = value))
-                        },
-                        valueRange = 1.3f..2.4f,
-                        steps = 10,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .semantics { contentDescription = "行距" },
-                    )
-                }
-            }
-            item {
-                SettingChoices("外观", listOf("白色", "纸色", "夜间"),
-                    listOf("white", "paper", "night").indexOf(settings.theme)) {
-                    onChange(settings.copy(theme = listOf("white", "paper", "night")[it]))
-                }
-            }
-            item {
-                SettingChoices("翻页", listOf("横向", "滚动"), if (settings.scroll) 1 else 0) {
-                    onChange(settings.copy(scroll = it == 1))
-                }
-            }
-            item {
-                SettingChoices("字体", listOf("宋体", "黑体"), if (settings.serif) 0 else 1) {
-                    onChange(settings.copy(serif = it == 0))
-                }
-            }
-            item {
-                Rule()
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 20.dp).heightIn(min = 48.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("保持亮屏", Modifier.weight(1f), fontSize = 18.sp, color = Ink)
-                    Switch(
-                        checked = settings.keepScreenOn,
-                        onCheckedChange = { onChange(settings.copy(keepScreenOn = it)) },
-                        modifier = Modifier.heightIn(min = 48.dp)
-                            .semantics { contentDescription = "保持亮屏" },
-                    )
-                }
-            }
-            item { ActionButton("开源许可", onLicenses, Modifier.fillMaxWidth()) }
         }
     }
 }
@@ -575,7 +803,7 @@ private fun PlainTextButton(label: String, onClick: () -> Unit, modifier: Modifi
         onClick = onClick,
         modifier = modifier.heightIn(min = 48.dp),
         minHeight = 48.dp,
-        colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = Ink),
+        colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = MiuixTheme.colorScheme.onSurface),
         textStyle = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium),
     )
 }
@@ -592,7 +820,7 @@ private fun ChoiceRow(
             Column(Modifier.weight(1f).semantics { selected = index == selectedIndex }) {
                 PlainTextButton(label, { onSelect(index) }, Modifier.fillMaxWidth())
                 Box(Modifier.fillMaxWidth().height(2.dp)
-                    .background(if (index == selectedIndex) Accent else Line))
+                    .background(if (index == selectedIndex) Accent else MiuixTheme.colorScheme.dividerLine))
             }
         }
     }
@@ -600,21 +828,47 @@ private fun ChoiceRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun BookTile(book: Book, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+private fun BookTile(
+    book: Book,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    progress: ReadingProgress? = null,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) .97f else 1f, tween(130), label = "bookPress")
     Column(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp)
-            .semantics(mergeDescendants = true) { contentDescription = book.title }
+        modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .semantics(mergeDescendants = true) {}
             .combinedClickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
                 role = Role.Button,
                 onClick = onClick,
                 onLongClick = onLongClick,
-                onLongClickLabel = if (onLongClick != null) "删除书籍" else null,
+                onLongClickLabel = if (onLongClick != null) "管理书籍" else null,
             ),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         BookCover(book, Modifier.fillMaxWidth())
-        Text(book.title, Modifier.clearAndSetSemantics {}, fontSize = 16.sp,
-            lineHeight = 23.sp, color = Ink, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(10.dp))
+        Text(book.title, Modifier.fillMaxWidth().height(46.dp), fontSize = 16.sp,
+            fontWeight = FontWeight.Medium, lineHeight = 23.sp, color = Ink,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(4.dp))
+        Text(book.author, Modifier.fillMaxWidth().height(22.dp), fontSize = 14.sp,
+            fontWeight = FontWeight.Normal, lineHeight = 22.sp, color = Muted,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (progress != null) {
+            val fraction = progress.fraction.coerceIn(0.0, 1.0).toFloat()
+            Spacer(Modifier.height(8.dp))
+            Text("已读 ${(fraction * 100).roundToInt()}%", fontSize = 14.sp, lineHeight = 22.sp, color = Muted)
+            Spacer(Modifier.height(5.dp))
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Line)) {
+                Box(Modifier.fillMaxWidth(fraction).height(2.dp).background(Accent))
+            }
+        }
     }
 }
 
@@ -639,6 +893,10 @@ private val BookGlyph: ImageVector = ImageVector.Builder(
 
 @Composable
 private fun BookCover(book: Book, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val request = remember(context, book.cover) {
+        ImageRequest.Builder(context).data(book.cover).crossfade(180).build()
+    }
     Box(
         modifier.aspectRatio(2f / 3f).clip(RoundedCornerShape(6.dp)).background(Soft),
         contentAlignment = Alignment.Center,
@@ -646,7 +904,7 @@ private fun BookCover(book: Book, modifier: Modifier = Modifier) {
         Icon(BookGlyph, contentDescription = null, modifier = Modifier.size(36.dp), tint = Muted)
         if (book.cover.isNotBlank()) {
             AsyncImage(
-                model = book.cover,
+                model = request,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
@@ -670,15 +928,15 @@ private fun Rule() {
 @Composable
 private fun SettingValue(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontSize = 18.sp, color = Ink)
-        Text(value, fontSize = 18.sp, color = Ink)
+        Text(label, fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
+        Text(value, fontSize = 15.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
     }
 }
 
 @Composable
 private fun SettingChoices(title: String, labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(title, fontSize = 18.sp, color = Ink)
+        Text(title, fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
         ChoiceRow(labels, selected, onSelect)
     }
 }

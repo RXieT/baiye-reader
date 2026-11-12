@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.rxiet.baiye"
         minSdk = 33
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val relayKey = providers.environmentVariable("WENKU_RELAY_BUILD_KEY").orElse("").get().trim()
         buildConfigField("String", "WENKU_RELAY_BUILD_KEY", "\"${relayKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
