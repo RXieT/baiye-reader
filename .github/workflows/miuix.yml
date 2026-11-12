@@ -1,0 +1,22 @@
+name: Miuix
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/top/yukonga/miuix
+          key: miuix-ea1b935-android-v2
+      - run: bash scripts/build-miuix.sh

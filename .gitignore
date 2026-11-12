@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+.idea/
+local.properties
+**/build/
+*.jks
+*.keystore
+*.apk
+*.apks
+*.hprof
+node_modules/
+playwright-report/
+test-results/
