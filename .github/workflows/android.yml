@@ -1,0 +1,130 @@
+name: Android
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      emulator:
+        description: Run Android smoke tests
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
+      - name: Cache official Miuix OS4 preview
+        id: miuix
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/top/yukonga/miuix
+          key: miuix-ea1b935-android-v2
+      - name: Compile pinned Miuix
+        if: steps.miuix.outputs.cache-hit != 'true'
+        run: bash scripts/build-miuix.sh
+      - name: Save Miuix cache
+        if: steps.miuix.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.m2/repository/top/yukonga/miuix
+          key: miuix-ea1b935-android-v2
+      - name: Prepare release signing
+        env:
+          SIGNING_STORE: ${{ secrets.ANDROID_SIGNING_STORE }}
+        run: |
+          if [ -n "$SIGNING_STORE" ]; then
+            printf '%s' "$SIGNING_STORE" | base64 -d > "$RUNNER_TEMP/baiye.p12"
+            chmod 600 "$RUNNER_TEMP/baiye.p12"
+            echo "ANDROID_SIGNING_PATH=$RUNNER_TEMP/baiye.p12" >> "$GITHUB_ENV"
+          fi
+      - name: Tests and APK
+        env:
+          WENKU_RELAY_BUILD_KEY: ${{ secrets.WENKU_RELAY_BUILD_KEY }}
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: |
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest --no-daemon --stacktrace
+          mkdir -p delivery
+          if [ -n "${ANDROID_SIGNING_PATH:-}" ]; then
+            cp app/build/outputs/apk/release/app-release.apk delivery/Baiye.apk
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk delivery/Baiye.apk
+          fi
+          sha256sum delivery/Baiye.apk > delivery/SHA256SUMS
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Baiye-Android
+          path: delivery/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: app/build/reports/
+  smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.emulator
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.m2/repository/top/yukonga/miuix
+          key: miuix-ea1b935-android-v2
+          fail-on-cache-miss: true
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+            mkdir -p device-captures
+            adb pull /sdcard/Android/data/io.github.rxiet.baiye/files/screenshots device-captures/
+        env:
+          WENKU_RELAY_BUILD_KEY: ${{ secrets.WENKU_RELAY_BUILD_KEY }}
+      - name: Upload device reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-reports
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/connected_android_test_additional_output/
+            device-captures/
