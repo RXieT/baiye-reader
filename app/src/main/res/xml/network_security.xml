@@ -2,9 +2,9 @@
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">
-        <domain>pic.wenku8.com</domain>
-        <domain>pic.wenku8.cn</domain>
-        <domain>pic.wenku8.net</domain>
-        <domain>img.wenku8.com</domain>
+        <domain includeSubdomains="false">pic.wenku8.com</domain>
+        <domain includeSubdomains="false">pic.wenku8.cn</domain>
+        <domain includeSubdomains="false">pic.wenku8.net</domain>
+        <domain includeSubdomains="false">img.wenku8.com</domain>
     </domain-config>
 </network-security-config>
