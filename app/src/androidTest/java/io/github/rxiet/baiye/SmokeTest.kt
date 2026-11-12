@@ -47,7 +47,7 @@ class SmokeTest {
             app.library.load()
             app.library.add(Book("local-smoke", "排版测试", author = "白页", local = true), epubFile = file.name)
         }
-        ActivityScenario.launch<ReaderActivity>(Intent(app, ReaderActivity::class.java).putExtra("bookId", "local-smoke")).use {
+        ActivityScenario.launch<ReaderActivity>(Intent(app, ReaderActivity::class.java).putExtra("bookId", "local-smoke")).use { scenario ->
             compose.waitUntil(45000) { compose.onAllNodesWithText("第一章").fetchSemanticsNodes().isNotEmpty() }
             capture("reader")
             compose.onNodeWithText("目录").performClick()
@@ -59,7 +59,28 @@ class SmokeTest {
             }
             assertTrue(app.library.state.value.entries.first { entry -> entry.book.id == "local-smoke" }.progress.cfi.startsWith("epubcfi("))
             capture("reader-chapter")
+            assertEquals("false", readJs(scenario, "window.__baiyeAttack === true"))
+            scenario.recreate()
+            compose.waitUntil(15000) { compose.onAllNodesWithText("第二章").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals("第二章", app.library.state.value.entries.first { entry -> entry.book.id == "local-smoke" }.progress.chapter)
         }
+    }
+
+    private fun readJs(scenario: ActivityScenario<ReaderActivity>, script: String): String {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val result = java.util.concurrent.atomic.AtomicReference<String>()
+        fun web(view: android.view.View): android.webkit.WebView? {
+            if (view is android.webkit.WebView) return view
+            if (view is android.view.ViewGroup) for (index in 0 until view.childCount) web(view.getChildAt(index))?.let { return it }
+            return null
+        }
+        scenario.onActivity { activity ->
+            val reader = web(activity.window.decorView)
+            checkNotNull(reader)
+            reader.evaluateJavascript(script) { result.set(it); latch.countDown() }
+        }
+        check(latch.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        return result.get()
     }
 
     private fun capture(name: String) {
@@ -84,7 +105,7 @@ class SmokeTest {
             entry("OPS/nav.xhtml", """<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><a href="one.xhtml">第一章</a></li><li><a href="two.xhtml">第二章</a></li></ol></nav></body></html>""")
             for ((path, title) in listOf("one" to "第一章", "two" to "第二章")) {
                 val paragraphs = (1..36).joinToString("") { "<p>窗外的风吹动白纸。书页留下整齐的文字，让阅读回到内容本身。这段文字由项目编写，用于测试中文排版与翻页。</p>" }
-                entry("OPS/$path.xhtml", """<html xmlns="http://www.w3.org/1999/xhtml"><head><title>$title</title></head><body><h1>$title</h1>$paragraphs</body></html>""")
+                entry("OPS/$path.xhtml", """<html xmlns="http://www.w3.org/1999/xhtml"><head><title>$title</title></head><body><script>parent.__baiyeAttack = true;</script><h1>$title</h1>$paragraphs</body></html>""")
             }
         }
     }

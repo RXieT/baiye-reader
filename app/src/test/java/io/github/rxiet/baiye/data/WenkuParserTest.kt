@@ -55,4 +55,5 @@ class WenkuParserTest {
     @Test(expected = IllegalArgumentException::class) fun zipPathsRejectTraversal() { resolveZipPath("", "../../etc/passwd") }
     @Test(expected = IllegalArgumentException::class) fun zipPathsRejectExternalUrls() { resolveZipPath("OPS", "https://example.org/a") }
     @Test(expected = IllegalArgumentException::class) fun zipPathsRejectEncodedTraversal() { resolveZipPath("", "%2e%2e/secret") }
+    @Test(expected = IllegalArgumentException::class) fun zipPathsRejectNestedEncodedTraversal() { resolveZipPath("OPS", "%2e%2e/%2e%2e/secret") }
 }

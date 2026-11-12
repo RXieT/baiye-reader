@@ -87,7 +87,7 @@ class ReaderActivity : ComponentActivity() {
             val controller = WindowInsetsControllerCompat(window, window.decorView)
             controller.isAppearanceLightStatusBars = settings.theme != "night"
             controller.isAppearanceLightNavigationBars = settings.theme != "night"
-            if (ready) command(JSONObject().put("type", "settings").put("settings", JSONObject(Json.encodeToString(settings))))
+            if (ready) command(JSONObject().put("type", "settings").put("settings", JSONObject(ReaderJson.encodeToString(settings))))
         }
         DisposableEffect(webView) {
             val current = webView
@@ -219,6 +219,10 @@ class ReaderActivity : ComponentActivity() {
         val assets = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context)).build()
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                vm.startingSession()
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 // Foliate owns its same-origin blob frames. Block top-level/external navigation,
                 // not the renderer's own iframe loads.
@@ -233,7 +237,7 @@ class ReaderActivity : ComponentActivity() {
                 if (uri.scheme != "https" || uri.host != HOST || request.method != "GET") return response("", "text/plain", 403)
                 return try {
                     when {
-                        uri.path == "/session.json" -> response(Json.encodeToString(document.manifest), "application/json")
+                        uri.path == "/session.json" -> response(ReaderJson.encodeToString(vm.sessionManifest(document)), "application/json")
                         uri.path == "/book.epub" && document.entry.book.local -> {
                             val root = File(context.filesDir, "imports").canonicalFile
                             val file = File(root, document.entry.epubFile).canonicalFile
@@ -280,8 +284,7 @@ class ReaderActivity : ComponentActivity() {
                             val href = row.optString("href")
                             if (href.isBlank()) null else ReaderToc(row.optString("label").take(500), href.take(4096))
                         }
-                        vm.error.value = null
-                        vm.ready.value = true
+                        vm.readerReady()
                     }
                     "loaded" -> vm.error.value = null
                     "relocate" -> vm.record(ReadingProgress(

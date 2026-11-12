@@ -13,6 +13,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+internal val ReaderJson = Json { encodeDefaults = true }
 
 @Serializable
 data class ReaderManifest(
@@ -39,8 +42,28 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
     private var pendingProgress: ReadingProgress? = null
     private var saveJob: Job? = null
     private var loadJob: Job? = null
+    @Volatile private var startConsumed = savedState.get<Boolean>("chapterConsumed") ?: false
 
     init { load() }
+
+    fun sessionManifest(document: ReaderDocument): ReaderManifest {
+        val current = progress.value
+        return document.manifest.copy(
+            initialCfi = current.cfi,
+            initialChapterId = current.chapterId,
+            startChapterId = if (startConsumed) "" else document.manifest.startChapterId,
+            settings = library.value.settings,
+        )
+    }
+
+    fun startingSession() { ready.value = false }
+
+    fun readerReady() {
+        startConsumed = true
+        savedState["chapterConsumed"] = true
+        error.value = null
+        ready.value = true
+    }
 
     fun load() {
         loadJob?.cancel()
