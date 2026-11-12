@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
-import androidx.compose.material.icons.filled.ExpandMore
 import io.github.rxiet.baiye.data.AppAppearance
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -436,7 +435,7 @@ fun DetailScreen(
                                 Text(if (expanded) "收起简介" else "展开简介", fontSize = 16.sp,
                                     fontWeight = FontWeight.Medium, color = Ink)
                                 val rotation by animateFloatAsState(if (expanded) 180f else 0f, tween(160), label = "intro")
-                                Icon(Icons.Default.ExpandMore, contentDescription = null,
+                                Icon(ExpandGlyph, contentDescription = null,
                                     modifier = Modifier.graphicsLayer { rotationZ = rotation }, tint = Muted)
                             }
                         }
@@ -1046,6 +1045,14 @@ private val BookGlyph: ImageVector = ImageVector.Builder(
         lineTo(23f, 12f)
         moveTo(16f, 17f)
         lineTo(23f, 17f)
+    }
+}.build()
+
+private val ExpandGlyph: ImageVector = ImageVector.Builder(
+    name = "Expand", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(fill = null, stroke = SolidColor(Muted), strokeLineWidth = 2f) {
+        moveTo(6f, 9f); lineTo(12f, 15f); lineTo(18f, 9f)
     }
 }.build()
 
