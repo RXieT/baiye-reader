@@ -75,6 +75,15 @@ jobs:
           path: delivery/
           if-no-files-found: error
           retention-days: 30
+      - name: Upload test APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-apks
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -95,12 +104,10 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v4
-      - uses: actions/cache/restore@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: ~/.m2/repository/top/yukonga/miuix
-          key: miuix-ea1b935-android-v2
-          fail-on-cache-miss: true
+          name: android-test-apks
+          path: test-apks
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -111,14 +118,10 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
+          target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: |
-            ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
-            mkdir -p device-captures
-            adb pull /sdcard/Android/data/io.github.rxiet.baiye/files/screenshots device-captures/
-        env:
-          WENKU_RELAY_BUILD_KEY: ${{ secrets.WENKU_RELAY_BUILD_KEY }}
+          script: bash scripts/android-smoke.sh
       - name: Upload device reports
         if: always()
         uses: actions/upload-artifact@v4

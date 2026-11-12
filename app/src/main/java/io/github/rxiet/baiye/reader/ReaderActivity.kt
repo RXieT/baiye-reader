@@ -107,7 +107,12 @@ class ReaderActivity : ComponentActivity() {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { context ->
-                        buildWebView(context, vm, doc) { chrome = !chrome }.also { webView = it }
+                        try {
+                            buildWebView(context, vm, doc) { chrome = !chrome }.also { webView = it }
+                        } catch (_: Exception) {
+                            vm.error.value = "请更新 WebView"
+                            android.widget.FrameLayout(context)
+                        }
                     },
                 )
             } else if (error == null) {
@@ -172,8 +177,10 @@ class ReaderActivity : ComponentActivity() {
                 ) {
                     Text(error.orEmpty(), fontSize = 20.sp, color = foreground)
                     ActionButton("重试", {
+                        val requiresNewWebView = webView == null || error == "请更新 WebView"
                         vm.error.value = null
                         if (document == null) vm.load()
+                        else if (requiresNewWebView) recreate()
                         else if (!vm.ready.value) webView?.reload()
                         else command(JSONObject().put("type", "retry"))
                     })
