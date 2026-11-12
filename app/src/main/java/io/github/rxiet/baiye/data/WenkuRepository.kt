@@ -13,10 +13,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.FormBody
+import okhttp3.Response
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
@@ -154,28 +160,46 @@ class WenkuRepository(context: Context) {
     }.getOrNull()
     private fun detailFile(id: String) = File(folder, "detail-$id.json")
 
-    private fun api(inner: String): String {
+    private suspend fun api(inner: String): String {
         val body = FormBody.Builder()
             .add("appver", WenkuVersion.value())
             .add("request", Base64.getEncoder().encodeToString(inner.toByteArray(Charsets.UTF_8)))
             .add("timetoken", System.currentTimeMillis().toString()).build()
         val request = Request.Builder().url("https://wenku8-relay.mewx.org/")
             .header("User-Agent", "Baiye/1.0 Android").post(body).build()
-        val result = String(bytes(request, 8 * 1024 * 1024), Charsets.UTF_8)
+        val result = String(awaitBytes(request, 8 * 1024 * 1024), Charsets.UTF_8)
         if (result.isBlank() || result.trimStart().startsWith("<!DOCTYPE", true)
             || result.trimStart().startsWith("<html", true) || result.trim().equals("Bad request.", true)) throw IOException("书源暂不可用")
         return result
     }
 
-    private fun bytes(request: Request, limit: Int): ByteArray {
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("书源请求失败 ${response.code}")
-            val body = response.body ?: throw IOException("空响应")
-            if (body.contentLength() > limit) throw IOException("响应过大")
-            val data = body.byteStream().use { it.readNBytes(limit + 1) }
-            if (data.size > limit) throw IOException("响应过大")
-            return data
-        }
+    private fun bytes(request: Request, limit: Int): ByteArray = client.newCall(request).execute().use { readResponse(it, limit) }
+
+    private suspend fun awaitBytes(request: Request, limit: Int): ByteArray = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(error)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val data = response.use { if (!continuation.isActive) return; readResponse(it, limit) }
+                    continuation.resume(data)
+                } catch (error: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+            }
+        })
+    }
+
+    private fun readResponse(response: Response, limit: Int): ByteArray {
+        if (!response.isSuccessful) throw IOException("书源请求失败 ${response.code}")
+        val body = response.body ?: throw IOException("空响应")
+        if (body.contentLength() > limit) throw IOException("响应过大")
+        val data = body.byteStream().use { it.readNBytes(limit + 1) }
+        if (data.size > limit) throw IOException("响应过大")
+        return data
     }
 
     private fun web(path: String): Document {
