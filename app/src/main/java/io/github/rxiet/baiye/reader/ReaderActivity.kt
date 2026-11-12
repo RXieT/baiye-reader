@@ -116,6 +116,7 @@ class ReaderActivity : ComponentActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    @OptIn(ExperimentalLayoutApi::class)
     @Composable
     private fun Reader(vm: ReaderViewModel = viewModel()) {
         readerModel = vm
