@@ -5,6 +5,11 @@ local.properties
 **/build/
 *.jks
 *.keystore
+*.p12
+*.pem
+.env
+.env.*
+*build-key.txt
 *.apk
 *.apks
 *.hprof

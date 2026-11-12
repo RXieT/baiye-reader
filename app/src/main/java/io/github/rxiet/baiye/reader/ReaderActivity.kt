@@ -219,7 +219,14 @@ class ReaderActivity : ComponentActivity() {
         val assets = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context)).build()
         webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = true
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                // Foliate owns its same-origin blob frames. Block top-level/external navigation,
+                // not the renderer's own iframe loads.
+                val uri = request.url
+                if (!request.isForMainFrame && uri.scheme == "blob" && uri.toString().startsWith("blob:$ORIGIN/")) return false
+                if (!request.isForMainFrame && uri.scheme == "https" && uri.host == HOST && uri.path?.startsWith("/chapter/") == true) return false
+                return true
+            }
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
                 val uri = request.url
