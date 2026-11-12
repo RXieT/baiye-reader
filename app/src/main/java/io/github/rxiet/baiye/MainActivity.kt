@@ -58,6 +58,16 @@ class MainActivity : ComponentActivity() {
         val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) { vm.importBook(uri); screen = "shelf" }
         }
+        val readerFontImporter = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) vm.importFont(uri)
+        }
+        val uiFontImporter = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) vm.importFont(uri, forInterface = true)
+        }
+        val backgroundImporter = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) vm.importBackground(uri)
+        }
+        val fontTypes = arrayOf("font/ttf", "font/otf", "font/collection", "application/x-font-ttf", "application/vnd.ms-opentype", "application/octet-stream")
         LaunchedEffect(vm) {
             vm.messages.collect { Toast.makeText(this@MainActivity, it, Toast.LENGTH_SHORT).show() }
         }
@@ -114,7 +124,13 @@ class MainActivity : ComponentActivity() {
                                     onDownload = vm::download, onCancelDownload = vm::cancelDownload,
                                 )
                             } ?: LaunchedEffect(Unit) { screen = "catalog" }
-                            "settings" -> SettingsScreen(library.settings, { vm.settings(it) }, goBack, { screen = "licenses" })
+                            "settings" -> SettingsScreen(
+                                library.settings, { vm.settings(it) }, goBack, { screen = "licenses" },
+                                onImportReaderFont = { readerFontImporter.launch(fontTypes) },
+                                onImportBackground = { backgroundImporter.launch(arrayOf("image/*")) },
+                                appearance = library.appearance, onAppearance = { vm.appearance(it) },
+                                onImportUiFont = { uiFontImporter.launch(fontTypes) },
+                            )
                             "licenses" -> LicensesScreen(onBack = goBack)
                         }
                     }

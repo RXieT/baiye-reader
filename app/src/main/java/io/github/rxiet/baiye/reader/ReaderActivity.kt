@@ -20,17 +20,19 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.PredictiveBackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,11 +54,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -74,14 +78,14 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
+import androidx.compose.ui.graphics.toArgb
+
 import kotlin.math.roundToInt
 
 class ReaderActivity : ComponentActivity() {
@@ -129,9 +133,19 @@ class ReaderActivity : ComponentActivity() {
         val fixedLayout by vm.fixedLayout.collectAsStateWithLifecycle()
         var webView by remember { mutableStateOf<WebView?>(null) }
         var panel by remember { mutableStateOf("") }
-        var sheetPage by remember { mutableStateOf("main") }
         var everReady by remember { mutableStateOf(false) }
         var seek by remember { mutableStateOf<Float?>(null) }
+        var seeking by remember { mutableStateOf(false) }
+        var seekSection by remember { mutableIntStateOf(-1) }
+        var curlView by remember { mutableStateOf<PageCurlView?>(null) }
+        var turnOverlayActive by remember { mutableStateOf(false) }
+        var captureArea by remember { mutableStateOf(android.graphics.Rect()) }
+        val importBackground = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let { vm.importBackground(it) }
+        }
+        val importFont = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let { vm.importFont(it) }
+        }
         val paper = when (settings.theme) {
             "night" -> Color(0xFF171717)
             "white" -> Color.White
@@ -139,8 +153,27 @@ class ReaderActivity : ComponentActivity() {
             else -> Color(0xFFF6F1E7)
         }
         val foreground = if (settings.theme == "night") Color(0xFFE4E1D9) else Color(0xFF242820)
-        val command: (JSONObject) -> Unit = { data ->
+        val rawCommand: (JSONObject) -> Unit = { data ->
             webView?.evaluateJavascript("window.Reader?.commands(${data});", null)
+        }
+        val turn: (Int) -> Unit = { delta ->
+            panel = ""
+            val native = curlView
+            if (settings.turnAnimation == "none" || settings.scroll || native == null) {
+                rawCommand(JSONObject().put("type", "nativeTurn").put("direction", delta))
+            } else {
+                native.paperColor = paper.toArgb()
+                native.capture(window, captureArea, delta, settings.turnAnimation) {
+                    rawCommand(JSONObject().put("type", "nativeTurn").put("direction", delta))
+                }
+            }
+        }
+        val command: (JSONObject) -> Unit = { data ->
+            when (data.optString("type")) {
+                "next" -> turn(1)
+                "prev" -> turn(-1)
+                else -> rawCommand(data)
+            }
         }
         val retry: () -> Unit = {
             val needsNewWebView = rendererLost || webView == null || error == "请更新 WebView"
@@ -151,10 +184,17 @@ class ReaderActivity : ComponentActivity() {
             else command(JSONObject().put("type", "retry"))
         }
         val backPanel: () -> Unit = {
-            if (panel != "main" && panel.isNotEmpty()) panel = "main" else panel = ""
+            panel = when (panel) {
+                "background", "brightness", "turn" -> "more"
+                "main", "" -> ""
+                else -> "main"
+            }
         }
-        // Keep the last page during the sheet's closing animation.
-        LaunchedEffect(panel) { if (panel.isNotEmpty()) sheetPage = panel }
+        LaunchedEffect(progress.page, progress.sectionIndex, seeking) {
+            if (!seeking && seek != null && progress.sectionIndex == seekSection && progress.page == seek?.roundToInt()) {
+                seek = null
+            }
+        }
         LaunchedEffect(ready) { if (ready) everReady = true }
         LaunchedEffect(settings.keepScreenOn, settings.brightness) {
             if (settings.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -179,7 +219,7 @@ class ReaderActivity : ComponentActivity() {
                 { delta -> command(JSONObject().put("type", if (delta < 0) "prev" else "next")) }
             } else null
         }
-        DisposableEffect(Unit) { onDispose { volumeTurn = null; capturedVolumeKeys.clear() } }
+        DisposableEffect(Unit) { onDispose { volumeTurn = null; capturedVolumeKeys.clear(); curlView?.clear() } }
         DisposableEffect(webView) {
             val current = webView
             onDispose {
@@ -199,7 +239,11 @@ class ReaderActivity : ComponentActivity() {
         // the book. Broadcast time/battery updates live only in ReadingStatus.
         Box(Modifier.fillMaxSize().background(paper)
             .windowInsetsPadding(WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout))) {
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInWindow()
+                captureArea = android.graphics.Rect(bounds.left.roundToInt(), bounds.top.roundToInt(),
+                    bounds.right.roundToInt(), bounds.bottom.roundToInt())
+            }) {
                 if (settings.showReadingStatus) {
                     Text(progress.chapter.ifBlank { document?.entry?.book?.title.orEmpty() },
                         Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
@@ -213,8 +257,22 @@ class ReaderActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             factory = { context ->
                                 try {
-                                    buildWebView(context, vm, doc) { panel = if (panel.isEmpty()) "main" else "" }
-                                        .also { webView = it }
+                                    buildWebView(context, vm, doc,
+                                        onTap = { panel = if (panel.isEmpty()) "main" else "" },
+                                        onReaderEvent = { event ->
+                                            when (event.optString("type")) {
+                                                "turn" -> turn(if (event.optInt("direction", 1) < 0) -1 else 1)
+                                                "turnEnd" -> if (event.optBoolean("changed", true)) curlView?.turnEnd() else curlView?.clear()
+                                                "interaction", "nativeTurn" -> {
+                                                    val slider = event.optString("source") == "slider"
+                                                    if (!slider) {
+                                                        panel = ""
+                                                        seek = null
+                                                        seeking = false
+                                                    }
+                                                }
+                                            }
+                                        }).also { webView = it }
                                 } catch (failure: Exception) {
                                     android.util.Log.w("BaiyeReader", "WebView initialization failed", failure)
                                     vm.error.value = "请更新 WebView"
@@ -227,6 +285,36 @@ class ReaderActivity : ComponentActivity() {
                     }
                 }
                 if (settings.showReadingStatus) ReadingStatus(progress, settings.scroll, foreground, fixedLayout)
+            }
+            AndroidView(factory = { context -> PageCurlView(context).also {
+                it.onActiveChanged = { active -> turnOverlayActive = active }
+                curlView = it
+            } }, modifier = Modifier.fillMaxSize().zIndex(if (turnOverlayActive) 1f else -1f))
+            if (!turnOverlayActive) {
+                val overlayColors = if (settings.theme == "night") darkColorScheme(primary = Accent,
+                    background = paper, surface = Color(0xFF242424)) else MiuixTheme.colorScheme
+                MiuixTheme(colors = overlayColors) {
+                    ReaderOverlay(panel = panel, onPanel = { panel = it }, onBack = backPanel,
+                paper = paper, ink = foreground, ready = ready,
+                pageSeekEnabled = ready && !settings.scroll && !fixedLayout && progress.pageCount > 1, progress = progress,
+                seek = seek, onSeek = { value ->
+                    seeking = true
+                    seek = value.roundToInt().toFloat()
+                    seekSection = progress.sectionIndex
+                    command(JSONObject().put("type", "page").put("page", value.roundToInt())
+                        .put("sectionIndex", seekSection))
+                }, onSeekFinished = { seeking = false },
+                onSection = { delta ->
+                    seek = null; seeking = false
+                    command(JSONObject().put("type", "section").put("delta", delta))
+                }, secondary = { page ->
+                    if (page == "toc") ReaderContents(toc, progress.tocHref, foreground) { href ->
+                        command(JSONObject().put("type", "goto").put("href", href)); panel = ""
+                    } else ReadingPreferences(settings = settings, onChange = { vm.settings(it) }, section = page,
+                        onImportFont = { importFont.launch(arrayOf("font/ttf", "font/otf", "application/octet-stream", "application/x-font-ttf", "application/vnd.ms-opentype")) },
+                        onImportBackground = { importBackground.launch(arrayOf("image/*")) })
+                })
+                }
             }
             if (everReady && readingError != null) {
                 Row(Modifier.align(Alignment.BottomCenter)
@@ -255,113 +343,141 @@ class ReaderActivity : ComponentActivity() {
                 }
             }
         }
-        NativeMiuixSheet(show = panel.isNotEmpty(), secondary = sheetPage != "main", onBack = backPanel,
-            onDismiss = { panel = "" }, dark = settings.theme == "night") {
-            val sheetInk = MiuixTheme.colorScheme.onSurface
-            val height = LocalConfiguration.current.screenHeightDp.dp
-            Column(Modifier.fillMaxWidth().animateContentSize(tween(220))) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { if (sheetPage == "main") finish() else panel = "main" }, modifier = Modifier.size(48.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = if (sheetPage == "main") "返回" else "返回阅读菜单", tint = sheetInk)
+    }
+
+    /** These are siblings of the reading surface, never a dialog or a modal sheet.
+     * Only the actual controls hit-test; the rest of the book remains interactive. */
+    @Composable
+    private fun BoxScope.ReaderOverlay(
+        panel: String, onPanel: (String) -> Unit, onBack: () -> Unit,
+        paper: Color, ink: Color, ready: Boolean, pageSeekEnabled: Boolean, progress: ReadingProgress,
+        seek: Float?, onSeek: (Float) -> Unit, onSeekFinished: () -> Unit,
+        onSection: (Int) -> Unit, secondary: @Composable (String) -> Unit,
+    ) {
+        var retained by remember { mutableStateOf("more") }
+        if (panel.isNotEmpty() && panel != "main" && retained != panel) SideEffect { retained = panel }
+        AnimatedVisibility(visible = panel.isNotEmpty(), modifier = Modifier.align(Alignment.TopStart),
+            enter = fadeIn(tween(120)), exit = fadeOut(tween(100))) {
+            IconButton(onClick = { finish() }, modifier = Modifier.padding(8.dp).size(48.dp)
+                .background(paper, androidx.compose.foundation.shape.CircleShape)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = ink)
+            }
+        }
+        val secondaryPanel = panel.isNotEmpty() && panel != "main"
+        AnimatedVisibility(visible = panel == "main", modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(tween(130)) + slideInVertically(spring(dampingRatio = .86f, stiffness = Spring.StiffnessMedium)) { it / 5 },
+            exit = fadeOut(tween(100)) + slideOutVertically(tween(110)) { it / 8 }) {
+            Column(Modifier.fillMaxWidth().background(paper,
+                androidx.compose.foundation.shape.RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { onSection(-1) }, enabled = ready && progress.sectionIndex > 0,
+                        modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一章", tint = ink)
                     }
-                    Text(when (sheetPage) {
-                        "toc" -> "目录"; "type" -> "排版"; "background" -> "背景"; "more" -> "更多"
-                        else -> document?.entry?.book?.title.orEmpty()
-                    }, Modifier.weight(1f), fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                        color = sheetInk, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    IconButton(onClick = { panel = "" }, modifier = Modifier.size(48.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "关闭菜单", tint = sheetInk)
+                    Slider(value = (seek ?: progress.page.toFloat()).coerceIn(1f, progress.pageCount.coerceAtLeast(1).toFloat()),
+                        onValueChange = onSeek, valueRange = 1f..progress.pageCount.coerceAtLeast(2).toFloat(),
+                        enabled = pageSeekEnabled, onValueChangeFinished = onSeekFinished,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp))
+                    IconButton(onClick = { onSection(1) },
+                        enabled = ready && progress.sectionIndex + 1 < progress.sectionCount,
+                        modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "下一章", tint = ink)
                     }
                 }
-                AnimatedContent(targetState = sheetPage, label = "reader-panel", transitionSpec = {
-                    (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 8 }) togetherWith
-                        (fadeOut(tween(120)) + slideOutHorizontally(tween(180)) { -it / 12 })
-                }) { page ->
-                    when (page) {
-                        "toc" -> {
-                            val list = rememberLazyListState()
-                            LaunchedEffect(toc, progress.tocHref) {
-                                val index = toc.indexOfFirst { it.href.isNotBlank() && it.href == progress.tocHref }
-                                if (index >= 0) list.scrollToItem(index)
-                            }
-                            LazyColumn(Modifier.fillMaxWidth().height((height * .8f - 120.dp).coerceAtLeast(160.dp)),
-                                state = list, contentPadding = PaddingValues(vertical = 8.dp)) {
-                                items(toc) { item ->
-                                    val group = item.href.isBlank()
-                                    val current = !group && item.href == progress.tocHref
-                                    Text(item.label,
-                                        Modifier.fillMaxWidth()
-                                            .then(if (!group) Modifier.clickable {
-                                                command(JSONObject().put("type", "goto").put("href", item.href))
-                                                panel = ""
-                                            } else Modifier)
-                                            .heightIn(min = 48.dp)
-                                            .padding(start = (12 + item.depth.coerceIn(0, 12) * 16).dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
-                                        fontSize = if (group) 20.sp else 17.sp,
-                                        fontWeight = if (group) FontWeight.SemiBold else if (current) FontWeight.Medium else FontWeight.Normal,
-                                        color = if (current) MiuixTheme.colorScheme.primary else sheetInk,
-                                        lineHeight = 26.sp)
-                                }
-                            }
-                        }
-                        "type", "background", "more" -> Box(Modifier.fillMaxWidth()
-                            .height((height * .72f - 120.dp).coerceAtLeast(160.dp))) {
-                            ReadingPreferences(settings = settings, onChange = { vm.settings(it) }, section = page)
-                        }
-                        else -> Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-                            Slider(value = seek ?: progress.fraction.toFloat().coerceIn(0f, 1f),
-                                onValueChange = { seek = it }, valueRange = 0f..1f, enabled = ready,
-                                onValueChangeFinished = {
-                                    seek?.let { command(JSONObject().put("type", "fraction").put("fraction", it.toDouble())) }
-                                    seek = null
-                                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp))
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { command(JSONObject().put("type", "section").put("delta", -1)) },
-                                    enabled = ready && progress.sectionIndex > 0, modifier = Modifier.size(48.dp)) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一章", tint = sheetInk)
-                                }
-                                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(progress.chapter.ifBlank { "阅读进度" }, fontSize = 16.sp, color = sheetInk,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("${((seek?.toDouble() ?: progress.fraction) * 100).roundToInt()}%",
-                                        fontSize = 14.sp, color = sheetInk)
-                                }
-                                IconButton(onClick = { command(JSONObject().put("type", "section").put("delta", 1)) },
-                                    enabled = ready && progress.sectionIndex + 1 < progress.sectionCount, modifier = Modifier.size(48.dp)) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "下一章", tint = sheetInk)
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                listOf("toc" to "目录", "type" to "排版", "background" to "背景", "more" to "更多").forEach { (key, label) ->
-                                    Column(Modifier.weight(1f).sizeIn(minWidth = 64.dp, minHeight = 76.dp).clickable { panel = key }.padding(vertical = 12.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        MenuGlyph(key, sheetInk)
-                                        Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = sheetInk)
-                                    }
-                                }
-                            }
+                Row(Modifier.fillMaxWidth().height(88.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    listOf("toc" to "目录", "type" to "排版", "font" to "字体", "more" to "更多").forEach { (key, label) ->
+                        Column(Modifier.weight(1f).fillMaxHeight().clickable { onPanel(key) }.padding(vertical = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            MenuGlyph(key, ink)
+                            Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = ink)
                         }
                     }
+                }
+            }
+        }
+        // One 180ms transition only: fast first response, the final ~40ms settles.
+        AnimatedVisibility(visible = secondaryPanel, modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(tween(110)) + slideInVertically(tween(150, easing = CubicBezierEasing(.12f, .84f, .22f, 1f))) { it / 14 },
+            exit = fadeOut(tween(80)) + slideOutVertically(tween(95)) { it / 18 }) {
+            val page = if (secondaryPanel) panel else retained
+            val available = LocalConfiguration.current.screenHeightDp.dp
+            Column(Modifier.fillMaxWidth().height((available * if (page == "toc") .55f else .38f).coerceIn(240.dp, 480.dp))
+                .background(paper, androidx.compose.foundation.shape.RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                .padding(horizontal = 12.dp)) {
+                Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回上级", tint = ink)
+                    }
+                    Text(when (page) {
+                        "toc" -> "目录"; "type" -> "排版"; "font" -> "字体"; "background" -> "背景"; else -> "更多"
+                    }, Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.Medium, color = ink)
+                    IconButton(onClick = { onPanel("") }, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭菜单", tint = ink)
+                    }
+                }
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    if (page == "more") Column(Modifier.fillMaxSize()) {
+                        Button(onClick = { onPanel("background") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            colors = ButtonDefaults.buttonColors(color = ink.copy(alpha = .06f), contentColor = ink)) {
+                            MenuGlyph("background", ink)
+                            Spacer(Modifier.width(12.dp))
+                            Text("背景与亮度", fontSize = 16.sp)
+                        }
+                        Box(Modifier.fillMaxWidth().weight(1f)) { secondary("more") }
+                    } else secondary(page)
                 }
             }
         }
     }
 
     @Composable
-    private fun NativeMiuixSheet(show: Boolean, secondary: Boolean, onBack: () -> Unit,
-        onDismiss: () -> Unit, dark: Boolean, content: @Composable () -> Unit) {
-        val colors = if (dark) darkColorScheme(background = Color(0xFF171717), surface = Color(0xFF242424))
-            else MiuixTheme.colorScheme
-        MiuixTheme(colors = colors) {
-            WindowBottomSheet(show = show, onDismissRequest = onDismiss, allowDismiss = true,
-                insideMargin = DpSize(16.dp, 0.dp)) {
-                PredictiveBackHandler(enabled = show && secondary) { events ->
-                    events.collect()
-                    onBack()
+    private fun ReaderContents(toc: List<ReaderToc>, currentHref: String, ink: Color, go: (String) -> Unit) {
+        val groups = remember(toc) {
+            toc.indices.filter { index -> toc[index].href.isBlank() ||
+                (index + 1 < toc.size && toc[index + 1].depth > toc[index].depth) }.toSet()
+        }
+        val ends = remember(toc) {
+            groups.associateWith { start ->
+                // Some plain-text manifests use a blank-href volume with flat children.
+                val flatVolume = toc[start].href.isBlank() && toc.getOrNull(start + 1)?.depth == toc[start].depth
+                ((start + 1) until toc.size).firstOrNull { next ->
+                    if (flatVolume) toc[next].href.isBlank() && toc[next].depth <= toc[start].depth
+                    else toc[next].depth <= toc[start].depth
+                } ?: toc.size
+            }
+        }
+        val current = toc.indexOfFirst { it.href.isNotBlank() && it.href == currentHref }
+        var expanded by remember(toc, currentHref) { mutableStateOf(groups.filter { group ->
+            current >= group && current < (ends[group] ?: group + 1)
+        }.toSet()) }
+        val visible = toc.indices.filter { index -> groups.none { group ->
+            group < index && index < (ends[group] ?: group + 1) && group !in expanded
+        } }
+        val list = rememberLazyListState()
+        LaunchedEffect(currentHref, toc) {
+            val position = visible.indexOf(current)
+            if (position >= 0) list.scrollToItem(position)
+        }
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 12.dp)) {
+            items(visible, key = { it }) { index ->
+                val item = toc[index]
+                val group = index in groups
+                Row(Modifier.fillMaxWidth().clickable {
+                    if (group) expanded = if (index in expanded) expanded - index else expanded + index
+                    else if (item.href.isNotBlank()) go(item.href)
+                }.heightIn(min = 48.dp)
+                    .padding(start = (12 + item.depth.coerceIn(0, 12) * 16).dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.label, Modifier.weight(1f), fontSize = if (group) 17.sp else 15.sp,
+                        fontWeight = if (group || index == current) FontWeight.Medium else FontWeight.Normal,
+                        color = if (index == current) MiuixTheme.colorScheme.primary else ink, lineHeight = 24.sp)
+                    if (group) Canvas(Modifier.size(16.dp)) {
+                        val y = if (index in expanded) .65f else .35f
+                        drawLine(ink, Offset(size.width * .2f, size.height * (1f - y)), Offset(size.width * .5f, size.height * y), 1.5.dp.toPx())
+                        drawLine(ink, Offset(size.width * .5f, size.height * y), Offset(size.width * .8f, size.height * (1f - y)), 1.5.dp.toPx())
+                    }
                 }
-                Column(Modifier.navigationBarsPadding()) { content() }
             }
         }
     }
@@ -395,8 +511,7 @@ class ReaderActivity : ComponentActivity() {
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(time, Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ink)
-            Text(if (scroll && !fixedLayout) "${(progress.fraction * 100).roundToInt()}%"
-                else if (progress.pageCount > 0) "${if (fixedLayout) "" else "本章 "}${progress.page.coerceIn(1, progress.pageCount)} / ${progress.pageCount}" else "",
+            Text(if (progress.pageCount > 0) "${progress.page.coerceIn(1, progress.pageCount)} / ${progress.pageCount}" else "", 
                 fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ink)
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                 Canvas(Modifier.size(24.dp, 14.dp).semantics { contentDescription = if (charging) "正在充电" else "电量" }) {
@@ -437,7 +552,7 @@ class ReaderActivity : ComponentActivity() {
                     drawCircle(ink, stroke / 2, Offset(w * .12f, y))
                     drawLine(ink, Offset(w * .3f, y), Offset(w * .92f, y), stroke)
                 }
-                "type" -> {
+                "type", "font" -> {
                     drawLine(ink, Offset(w * .15f, h * .2f), Offset(w * .85f, h * .2f), stroke)
                     drawLine(ink, Offset(w * .5f, h * .2f), Offset(w * .5f, h * .85f), stroke)
                     drawLine(ink, Offset(w * .3f, h * .85f), Offset(w * .7f, h * .85f), stroke)
@@ -452,7 +567,8 @@ class ReaderActivity : ComponentActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun buildWebView(context: Context, vm: ReaderViewModel, document: ReaderDocument, onTap: () -> Unit): WebView {
+    private fun buildWebView(context: Context, vm: ReaderViewModel, document: ReaderDocument,
+        onTap: () -> Unit, onReaderEvent: (JSONObject) -> Unit): WebView {
         val webView = WebView(context)
         webView.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         webView.setBackgroundColor(AndroidColor.TRANSPARENT)
@@ -510,6 +626,34 @@ class ReaderActivity : ComponentActivity() {
                             val html = runBlocking(Dispatchers.IO) { vm.app.repository.chapterXhtml(document.entry.book.id, chapter) }
                             response(html, "application/xhtml+xml").apply { responseHeaders = CHAPTER_HEADERS }
                         }
+                        uri.pathSegments.firstOrNull() == "media" -> {
+                            val parts = uri.pathSegments
+                            check(parts.size == 3)
+                            val name = parts[2]
+                            check(name.isNotBlank() && name != "." && name != ".." &&
+                                name.none { it == '/' || it == '\\' || it == '\u0000' } &&
+                                name.matches(Regex("[A-Za-z0-9_.-]+")))
+                            val file = when (parts[1]) {
+                                "background" -> vm.app.media.backgroundFile(name)
+                                "font" -> vm.app.media.fontFile(name)
+                                else -> null
+                            } ?: return response("", "text/plain", 404)
+                            val mime = when (file.extension.lowercase()) {
+                                "png" -> "image/png"
+                                "jpg", "jpeg" -> "image/jpeg"
+                                "webp" -> "image/webp"
+                                "gif" -> "image/gif"
+                                "avif" -> "image/avif"
+                                "ttf" -> "font/ttf"
+                                "otf" -> "font/otf"
+                                "woff" -> "font/woff"
+                                "woff2" -> "font/woff2"
+                                else -> "application/octet-stream"
+                            }
+                            WebResourceResponse(mime, null, file.inputStream()).apply {
+                                responseHeaders = mapOf("Cache-Control" to "private, max-age=604800", "X-Content-Type-Options" to "nosniff")
+                            }
+                        }
                         uri.pathSegments.firstOrNull() == "image" -> {
                             val key = uri.pathSegments.getOrNull(1) ?: error("Unknown image")
                             val image = vm.app.repository.image(key)
@@ -564,6 +708,7 @@ class ReaderActivity : ComponentActivity() {
                         ))
                     }
                     "tap" -> onTap()
+                    "turn", "turnEnd", "interaction", "nativeTurn" -> onReaderEvent(data)
                     "error" -> {
                         if (BuildConfig.DEBUG) android.util.Log.w("BaiyeReader", data.optString("message").take(500))
                         vm.error.value = if (data.optString("message").contains("WebView")) "请更新 WebView"
@@ -580,7 +725,7 @@ class ReaderActivity : ComponentActivity() {
         const val HOST = "appassets.androidplatform.net"
         const val ORIGIN = "https://$HOST"
         private val CHAPTER_HEADERS = mapOf(
-            "Content-Security-Policy" to "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src https://$HOST data:; font-src 'none'; frame-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+            "Content-Security-Policy" to "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'self' https://$HOST data:; font-src 'self' https://$HOST; frame-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
             "X-Content-Type-Options" to "nosniff",
             "Cache-Control" to "no-store",
         )

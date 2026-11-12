@@ -44,6 +44,7 @@ class BaiyeApplication : Application(), SingletonImageLoader.Factory {
     val library by lazy { LibraryStore(this, ioScope) }
     val repository by lazy { WenkuRepository(this, httpClient) }
     val importer by lazy { EpubImporter(this) }
+    val media by lazy { io.github.rxiet.baiye.reader.ReaderMediaStore(this) }
 
     override fun newImageLoader(context: Context): ImageLoader = ImageLoader.Builder(context)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { httpClient })) }

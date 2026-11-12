@@ -3,6 +3,9 @@ package io.github.rxiet.baiye.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
+import androidx.compose.material.icons.filled.ExpandMore
+import io.github.rxiet.baiye.data.AppAppearance
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.LocalIndication
@@ -20,6 +23,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.Font
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import io.github.rxiet.baiye.BaiyeApplication
 import androidx.compose.material.icons.filled.Refresh
 import io.github.rxiet.baiye.data.ReadingProgress
 import kotlinx.coroutines.launch
@@ -122,6 +130,16 @@ fun CatalogScreen(
     val gridState = rememberSaveable(state.order, state.query, saver = LazyGridState.Saver) { LazyGridState() }
     val currentState by rememberUpdatedState(state)
     val currentOnMore by rememberUpdatedState(onMore)
+    val pageFade = remember { Animatable(1f) }
+    var previousPage by remember { mutableStateOf(state.order to state.query) }
+    LaunchedEffect(state.order, state.query) {
+        val page = state.order to state.query
+        if (previousPage != page) {
+            previousPage = page
+            pageFade.animateTo(0f, tween(70))
+            pageFade.animateTo(1f, tween(90))
+        }
+    }
     val scope = rememberCoroutineScope()
     var refreshVersion by remember(state.order, state.query) { mutableStateOf(0) }
     LaunchedEffect(gridState, refreshVersion) {
@@ -171,7 +189,7 @@ fun CatalogScreen(
                 label = "搜索",
                 useLabelAsPlaceholder = true,
                 singleLine = true,
-                textStyle = TextStyle(fontSize = 17.sp, color = Ink),
+                textStyle = TextStyle(fontSize = 17.sp, color = Ink, fontFamily = LocalAppFont.current),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { submit() }),
                 trailingIcon = {
@@ -190,7 +208,10 @@ fun CatalogScreen(
         LazyVerticalGrid(
             columns = GridCells.Adaptive(105.dp),
             state = gridState,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).graphicsLayer {
+                alpha = pageFade.value
+                translationX = (1f - pageFade.value) * 20.dp.toPx()
+            },
             contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 112.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
@@ -347,6 +368,15 @@ fun DetailScreen(
     val book = detail?.book ?: state.book
     var expanded by rememberSaveable(book.id) { mutableStateOf(false) }
     val volumes = remember(detail) { detail?.chapters?.groupBy { it.volume }.orEmpty() }
+    val currentVolume = detail?.chapters?.firstOrNull { it.id == progress?.chapterId }?.volume
+    var expandedVolumes by rememberSaveable(book.id) { mutableStateOf(arrayListOf<String>()) }
+    var volumesInitialized by rememberSaveable(book.id) { mutableStateOf(false) }
+    LaunchedEffect(detail != null, currentVolume) {
+        if (!volumesInitialized && detail != null) {
+            expandedVolumes = arrayListOf<String>().apply { currentVolume?.let { add(it) } }
+            volumesInitialized = true
+        }
+    }
     Column(Modifier.fillMaxSize().background(Color.White)) {
         Header("书籍", onBack)
         LazyColumn(
@@ -394,7 +424,21 @@ fun DetailScreen(
                                 maxLines = if (expanded) Int.MAX_VALUE else 4,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            PlainTextButton(if (expanded) "收起简介" else "展开简介", { expanded = !expanded })
+                            Spacer(Modifier.height(12.dp))
+                            Row(
+                                Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                    .clip(RoundedCornerShape(12.dp)).background(Soft)
+                                    .clickable(role = Role.Button) { expanded = !expanded }
+                                    .padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(if (expanded) "收起简介" else "展开简介", fontSize = 16.sp,
+                                    fontWeight = FontWeight.Medium, color = Ink)
+                                val rotation by animateFloatAsState(if (expanded) 180f else 0f, tween(160), label = "intro")
+                                Icon(Icons.Default.ExpandMore, contentDescription = null,
+                                    modifier = Modifier.graphicsLayer { rotationZ = rotation }, tint = Muted)
+                            }
                         }
                     }
                 }
@@ -431,14 +475,26 @@ fun DetailScreen(
                     item { FailureState("暂无章节", onRetry) }
                 }
                 volumes.forEach { (volume, chapters) ->
-                    if (volume.isNotBlank()) {
-                        item {
-                            Text(volume, Modifier.padding(top = 12.dp, bottom = 4.dp),
+                    val volumeExpanded = volume in expandedVolumes
+                    item(key = "volume:$volume") {
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .clickable(role = Role.Button) {
+                                    expandedVolumes = ArrayList(expandedVolumes).apply {
+                                        if (volumeExpanded) remove(volume) else add(volume)
+                                    }
+                                }.padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(if (volumeExpanded) "−" else "+", Modifier.width(32.dp),
+                                fontSize = 22.sp, color = Muted)
+                            Text(volume.ifBlank { "正文" }, Modifier.weight(1f),
                                 fontSize = 20.sp, lineHeight = 28.sp,
                                 fontWeight = FontWeight.SemiBold, color = Ink)
+                            Text("${chapters.size}章", fontSize = 14.sp, color = Muted)
                         }
                     }
-                    items(chapters, key = { it.id }) { chapter ->
+                    if (volumeExpanded) items(chapters, key = { it.id }) { chapter ->
                         Column(
                             Modifier.fillMaxWidth()
                                 .clickable(role = Role.Button) { onRead(chapter) },
@@ -463,10 +519,38 @@ fun SettingsScreen(
     onChange: (ReaderSettings) -> Unit,
     onBack: () -> Unit,
     onLicenses: () -> Unit,
+    onImportReaderFont: () -> Unit = {},
+    onImportBackground: () -> Unit = {},
+    appearance: AppAppearance = AppAppearance(),
+    onAppearance: (AppAppearance) -> Unit = {},
+    onImportUiFont: () -> Unit = {},
 ) {
+    var category by rememberSaveable { mutableStateOf(0) }
+    var typeSection by rememberSaveable { mutableStateOf(0) }
     Column(Modifier.fillMaxSize().background(Color.White)) {
         Header("设置", onBack)
-        PreferencesContent(settings, onChange, "all", Modifier.weight(1f), onLicenses)
+        ChoiceRow(listOf("排版", "外观", "阅读", "界面"), category, { category = it },
+            Modifier.padding(horizontal = 24.dp))
+        if (category == 0) {
+            ChoiceRow(listOf("间距", "字体"), typeSection, { typeSection = it },
+                Modifier.padding(horizontal = 24.dp))
+        }
+        if (category == 3) {
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("界面字体", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                Text(appearance.fontLabel, fontSize = 14.sp, color = Muted)
+                ActionButton("跟随系统", { onAppearance(AppAppearance()) }, Modifier.fillMaxWidth(),
+                    primary = appearance.fontFile.isBlank())
+                ActionButton("导入界面字体", onImportUiFont, Modifier.fillMaxWidth())
+                PlainTextButton("开源许可", onLicenses, Modifier.fillMaxWidth())
+            }
+        } else {
+            PreferencesContent(settings, onChange,
+                when (category) { 0 -> if (typeSection == 0) "type" else "font"; 1 -> "background"; else -> "more" },
+                Modifier.weight(1f), onImportFont = onImportReaderFont,
+                onImportBackground = onImportBackground)
+        }
     }
 }
 
@@ -475,8 +559,11 @@ fun ReadingPreferences(
     settings: ReaderSettings,
     onChange: (ReaderSettings) -> Unit,
     section: String = "type",
+    onImportFont: () -> Unit = {},
+    onImportBackground: () -> Unit = {},
 ) {
-    PreferencesContent(settings, onChange, section, Modifier.fillMaxSize())
+    PreferencesContent(settings, onChange, section, Modifier.fillMaxSize(),
+        onImportFont = onImportFont, onImportBackground = onImportBackground)
 }
 
 @Composable
@@ -485,7 +572,8 @@ private fun PreferencesContent(
     onChange: (ReaderSettings) -> Unit,
     section: String,
     modifier: Modifier,
-    onLicenses: (() -> Unit)? = null,
+    onImportFont: () -> Unit = {},
+    onImportBackground: () -> Unit = {},
 ) {
     val latest by rememberUpdatedState(settings)
     val change by rememberUpdatedState(onChange)
@@ -504,22 +592,46 @@ private fun PreferencesContent(
     )
     LazyColumn(
         modifier = modifier,
-        contentPadding = PaddingValues(24.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (section == "type" || section == "all") {
+        if (section == "type" || section == "font") {
             item(key = "preview") { ReadingPreview(preview) }
-            item(key = "type") {
-                PreferenceGroup("文字") {
+            item(key = "size") {
+                Column {
                     PreferenceSlider("字号", fontSize, fontSize.roundToInt().toString(), 16f..32f, 15,
                         { fontSize = it }) { change(latest.copy(fontSize = fontSize.roundToInt().coerceIn(16, 32))) }
+                }
+            }
+        }
+        if (section == "font") {
+            item(key = "font") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val modes = listOf("system" to "跟随系统", "serif" to "宋体", "sans" to "黑体") +
+                        if (settings.fontFile.isNotBlank()) listOf("custom" to settings.fontLabel.ifBlank { "已导入字体" }) else emptyList()
+                    modes.forEach { (mode, label) ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (settings.fontMode == mode) MiuixTheme.colorScheme.surfaceContainerHigh else Color.Transparent)
+                            .semantics { selected = settings.fontMode == mode }
+                            .clickable(role = Role.RadioButton) {
+                                change(latest.copy(fontMode = mode, serif = mode == "serif"))
+                            }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(label, Modifier.weight(1f), fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
+                            if (settings.fontMode == mode) Text("✓", fontSize = 16.sp, color = Accent)
+                        }
+                    }
+                    ActionButton("导入阅读字体", onImportFont, Modifier.fillMaxWidth())
                     PreferenceSlider("字重", fontWeight, ((fontWeight / 100).roundToInt() * 100).toString(), 300f..700f, 3,
                         { fontWeight = it }) {
                         change(latest.copy(fontWeight = ((fontWeight / 100).roundToInt() * 100).coerceIn(300, 700)))
                     }
-                    SettingChoices("字体", listOf("宋体", "黑体"), if (settings.serif) 0 else 1) {
-                        change(latest.copy(serif = it == 0))
-                    }
+                }
+            }
+        }
+        if (section == "type") {
+            item(key = "spacing") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     PreferenceSlider("行距", lineHeight, decimalValue(lineHeight), 1.3f..2.4f, 10,
                         { lineHeight = it }) { change(latest.copy(lineHeight = decimalValue(lineHeight).toDouble())) }
                     PreferenceSlider("段距", paragraphSpacing, decimalValue(paragraphSpacing), 0f..1.6f, 15,
@@ -533,10 +645,45 @@ private fun PreferencesContent(
                 }
             }
         }
-        if (section == "background" || section == "all") {
+        if (section == "background") {
             item(key = "background") {
-                PreferenceGroup("版面") {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     BackgroundChoices(settings.theme) { change(latest.copy(theme = it)) }
+                    Text("背景纹理", fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
+                    val backgrounds = listOf("none" to "无", "paper" to "纸张", "linen" to "亚麻", "mist" to "薄雾") +
+                        settings.backgroundPresets.map { it.id to it.name }
+                    backgrounds.chunked(2).forEach { pair ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            pair.forEach { (id, name) ->
+                                val preset = settings.backgroundPresets.firstOrNull { it.id == id }
+                                val active = settings.background == id
+                                Box(Modifier.weight(1f).height(72.dp).clip(RoundedCornerShape(12.dp))
+                                    .background(when (id) {
+                                        "paper" -> Color(0xFFF2E7CF)
+                                        "linen" -> Color(0xFFE5DFD2)
+                                        "mist" -> Color(0xFFE4EBED)
+                                        else -> if (preset?.dark == true) Color(0xFF303030) else Soft
+                                    })
+                                    .border(if (active) 2.dp else 1.dp, if (active) Accent else Line, RoundedCornerShape(12.dp))
+                                    .semantics { selected = active }
+                                    .clickable(role = Role.RadioButton) {
+                                        change(latest.copy(background = id, theme = when {
+                                            preset?.dark == true -> "night"
+                                            preset != null && latest.theme == "night" -> "paper"
+                                            else -> latest.theme
+                                        }))
+                                    },
+                                    contentAlignment = Alignment.BottomStart) {
+                                    if (preset != null) AsyncImage(model = (LocalContext.current.applicationContext as? BaiyeApplication)?.media?.backgroundFile(preset.file), contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                    Text(name, Modifier.fillMaxWidth().background(Color.White.copy(alpha = .88f)).padding(8.dp),
+                                        fontSize = 14.sp, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                    ActionButton("导入背景并保存预设", onImportBackground, Modifier.fillMaxWidth())
                     PreferenceSwitch("跟随系统亮度", settings.brightness < 0f) {
                         change(latest.copy(brightness = if (it) -1f else brightness.coerceIn(.1f, 1f)))
                     }
@@ -547,22 +694,22 @@ private fun PreferencesContent(
                 }
             }
         }
-        if (section == "more" || section == "all") {
+        if (section == "more" || section == "reading") {
             item(key = "more") {
-                PreferenceGroup("阅读") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     SettingChoices("翻页", listOf("横向", "滚动"), if (settings.scroll) 1 else 0) {
                         change(latest.copy(scroll = it == 1))
                     }
                     PreferenceSwitch("音量键翻页", settings.volumeKeys) { change(latest.copy(volumeKeys = it)) }
-                    PreferenceSwitch("翻页动画", settings.animatedPage) { change(latest.copy(animatedPage = it)) }
+                    SettingChoices("翻页动画", listOf("无动画", "现有", "翻书"),
+                        listOf("none", "slide", "curl").indexOf(settings.turnAnimation)) {
+                        change(latest.copy(turnAnimation = listOf("none", "slide", "curl")[it]))
+                    }
                     PreferenceSwitch("保持亮屏", settings.keepScreenOn) { change(latest.copy(keepScreenOn = it)) }
                     PreferenceSwitch("阅读状态", settings.showReadingStatus) { change(latest.copy(showReadingStatus = it)) }
                     PreferenceSwitch("全屏阅读", settings.immersive) { change(latest.copy(immersive = it)) }
                 }
             }
-        }
-        if (onLicenses != null) {
-            item(key = "licenses") { PlainTextButton("开源许可", onLicenses, Modifier.fillMaxWidth()) }
         }
     }
 }
@@ -578,6 +725,17 @@ private fun readingBackground(theme: String): Color = when (theme) {
 
 @Composable
 private fun ReadingPreview(settings: ReaderSettings) {
+    val app = LocalContext.current.applicationContext as? BaiyeApplication
+    val previewFamily by produceState<FontFamily>(FontFamily.Default, settings.fontMode, settings.fontFile) {
+        value = when (settings.fontMode) {
+            "serif" -> FontFamily.Serif
+            "sans" -> FontFamily.SansSerif
+            "custom" -> withContext(Dispatchers.IO) {
+                runCatching { app?.media?.fontFile(settings.fontFile)?.let { FontFamily(Font(it)) } }.getOrNull() ?: FontFamily.Default
+            }
+            else -> FontFamily.Default
+        }
+    }
     val foreground = when (settings.theme) {
         "night" -> Color(0xFFDEDAD2)
         "green" -> Color(0xFF243427)
@@ -593,7 +751,7 @@ private fun ReadingPreview(settings: ReaderSettings) {
             listOf("风穿过书页，故事继续。", "翻开下一页，远方也近了一些。").forEach { sentence ->
                 Text(sentence, fontSize = settings.fontSize.sp,
                     fontWeight = FontWeight(settings.fontWeight.coerceIn(300, 700)),
-                    fontFamily = if (settings.serif) FontFamily.Serif else FontFamily.SansSerif,
+                    fontFamily = previewFamily,
                     lineHeight = (settings.fontSize * settings.lineHeight).sp, color = foreground)
             }
         }
@@ -804,7 +962,7 @@ private fun PlainTextButton(label: String, onClick: () -> Unit, modifier: Modifi
         modifier = modifier.heightIn(min = 48.dp),
         minHeight = 48.dp,
         colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = MiuixTheme.colorScheme.onSurface),
-        textStyle = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium),
+        textStyle = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium, fontFamily = LocalAppFont.current),
     )
 }
 

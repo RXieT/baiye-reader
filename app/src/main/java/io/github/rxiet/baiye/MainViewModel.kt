@@ -162,6 +162,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         catch (failure: Exception) { android.util.Log.w("BaiyeLibrary", "Settings write deferred", failure) }
     }
 
+    fun appearance(appearance: AppAppearance) = viewModelScope.launch { app.library.appearance(appearance) }
+
+    fun importFont(uri: Uri, forInterface: Boolean = false) = viewModelScope.launch {
+        try {
+            val font = app.media.importFont(uri)
+            if (forInterface) app.library.appearance(AppAppearance(font.file, font.label))
+            else app.library.settings(library.value.settings.copy(fontMode = "custom", fontFile = font.file, fontLabel = font.label))
+            mutableMessages.emit("字体已导入")
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { mutableMessages.emit("无法导入字体") }
+    }
+
+    fun importBackground(uri: Uri) = viewModelScope.launch {
+        try {
+            val background = app.media.importBackground(uri)
+            val current = library.value.settings
+            app.library.settings(current.copy(background = background.id,
+                theme = if (background.dark) "night" else current.theme.takeIf { it != "night" } ?: "paper",
+                backgroundPresets = current.backgroundPresets.filterNot { it.id == background.id } + background))
+            mutableMessages.emit("背景已保存")
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { mutableMessages.emit("无法导入背景") }
+    }
+
     fun download() {
         val detail = detail.value?.detail ?: return
         if (downloadJob?.isActive == true) { mutableMessages.tryEmit("正在缓存"); return }

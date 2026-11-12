@@ -58,12 +58,25 @@ data class ReaderSettings(
     val animatedPage: Boolean = true,
     val showReadingStatus: Boolean = true,
     val immersive: Boolean = true,
+    val turnAnimation: String = "slide",
+    val fontMode: String = "system",
+    val fontFile: String = "",
+    val fontLabel: String = "",
+    val background: String = "none",
+    val backgroundPresets: List<BackgroundPreset> = emptyList(),
 )
+
+@Serializable
+data class BackgroundPreset(val id: String, val name: String, val file: String, val dark: Boolean = false)
+
+@Serializable
+data class AppAppearance(val fontFile: String = "", val fontLabel: String = "系统字体")
 
 @Serializable
 data class LibraryState(
     val entries: List<ShelfEntry> = emptyList(),
     val settings: ReaderSettings = ReaderSettings(),
+    val appearance: AppAppearance = AppAppearance(),
 )
 
 enum class CatalogOrder(val label: String, val value: String) {

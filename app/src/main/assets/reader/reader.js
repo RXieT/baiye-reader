@@ -5,6 +5,8 @@ const DEFAULTS = {
     serif: true, keepScreenOn: true, fontWeight: 400, paragraphSpacing: .6,
     pageMargin: 24, brightness: -1, volumeKeys: false, animatedPage: true,
     showReadingStatus: true, immersive: true,
+    turnAnimation: 'slide', fontMode: 'system', fontFile: '', fontLabel: '',
+    background: 'none', backgroundPresets: [],
 }
 const COLORS = {
     paper: ['#F6F1E7', '#24211D', '#78542B'],
@@ -16,7 +18,10 @@ let session, engine, view, book, controller, latest, fault, retryTarget
 let settings = { ...DEFAULTS }
 let generation = 0, serial = Promise.resolve(), turnQueued = false
 let working = false, ready = false, pendingLoaded = false, touchUntil = 0
-let activeTarget, layoutObserver, pagination
+let activeTarget, layoutObserver, pagination, pendingPage, pageDrain
+let styleKey, lastTap
+const layoutKeys = ['fontSize', 'fontWeight', 'lineHeight', 'paragraphSpacing',
+    'pageMargin', 'scroll', 'fontMode', 'fontFile']
 
 function send(message) {
     if (window.top !== window) return
@@ -194,7 +199,24 @@ function cleanSettings(patch) {
     if (next.brightness < 0) next.brightness = -1
     for (const key of ['scroll', 'serif', 'keepScreenOn', 'volumeKeys', 'animatedPage', 'showReadingStatus', 'immersive'])
         if (typeof patch?.[key] === 'boolean') next[key] = patch[key]
+    for (const [key, values] of Object.entries({
+        turnAnimation: ['none', 'slide', 'curl'], fontMode: ['system', 'serif', 'sans', 'custom'],
+    })) if (values.includes(patch?.[key])) next[key] = patch[key]
+    if (typeof patch?.animatedPage === 'boolean' && !patch?.turnAnimation)
+        next.turnAnimation = patch.animatedPage ? 'slide' : 'none'
+    if (typeof patch?.serif === 'boolean' && !patch?.fontMode)
+        next.fontMode = patch.serif ? 'serif' : 'system'
+    for (const key of ['fontFile', 'fontLabel', 'background'])
+        if (typeof patch?.[key] === 'string') next[key] = patch[key]
+    if (Array.isArray(patch?.backgroundPresets)) next.backgroundPresets = patch.backgroundPresets
+        .filter(p => p && typeof p.id === 'string' && typeof p.file === 'string')
+        .map(p => ({ id: p.id, name: String(p.name || ''), file: p.file, dark: p.dark === true }))
     return next
+}
+function mediaURL(kind, file) {
+    if (typeof file !== 'string' || !file || file === '.' || file === '..'
+        || /[\/\\\u0000-\u001f\u007f]/.test(file)) return ''
+    return `${ORIGIN}/media/${kind}/${encodeURIComponent(file)}`
 }
 function updateGap() {
     if (!view || view.isFixedLayout) return
@@ -211,31 +233,88 @@ function applySettings() {
     if (!view) return
     const [background, foreground, link] = COLORS[settings.theme]
     const renderer = view.renderer
+    const textures = {
+        paper: 'repeating-linear-gradient(17deg, #88663308 0 1px, transparent 1px 5px)',
+        linen: 'repeating-linear-gradient(0deg, #8877550c 0 1px, transparent 1px 4px), repeating-linear-gradient(90deg, #8877550c 0 1px, transparent 1px 4px)',
+        mist: 'radial-gradient(ellipse at 20% 15%, #a8b8c530, transparent 70%)',
+    }
+    const preset = settings.backgroundPresets.find(p => p.id === settings.background)
+    const image = preset && mediaURL('background', preset.file)
+    const rgb = background.match(/\w\w/g).map(x => parseInt(x, 16)).join(',')
     document.documentElement.style.background = background
-    document.body.style.background = background
+    Object.assign(document.body.style, {
+        backgroundColor: background,
+        backgroundImage: image ? `linear-gradient(rgba(${rgb},${settings.theme === 'night' ? .78 : .72}), rgba(${rgb},${settings.theme === 'night' ? .78 : .72})), url("${image}")`
+            : textures[settings.background] || 'none',
+        backgroundSize: image ? 'cover' : 'auto', backgroundPosition: 'center',
+    })
+    // Paginator's closed-shadow background is a DOM part, not a canvas.
+    let shellStyle = document.getElementById('reader-shell-style')
+    if (!shellStyle) {
+        shellStyle = document.createElement('style')
+        shellStyle.id = 'reader-shell-style'
+        document.head.append(shellStyle)
+    }
+    shellStyle.textContent = `foliate-view::part(filter) { background: transparent !important; }
+        foliate-view { color: ${foreground}; --reader-link: ${link}; }`
+    for (const { doc } of renderer.getContents()) paintDocument(doc)
+    renderer.removeAttribute('animated')
     if (view.isFixedLayout) return
+    const key = JSON.stringify(layoutKeys.map(k => settings[k]))
+    if (styleKey === key) return
+    styleKey = key
+    const fontURL = settings.fontMode === 'custom' && mediaURL('font', settings.fontFile)
+    const family = fontURL ? 'ReaderCustom' : settings.fontMode === 'serif' ? 'serif' : 'sans-serif'
     renderer.setAttribute('flow', settings.scroll ? 'scrolled' : 'paginated')
     renderer.setAttribute('margin', `${settings.pageMargin}px`)
-    renderer.toggleAttribute('animated', settings.animatedPage)
+    renderer.removeAttribute('animated')
     updateGap()
     renderer.setAttribute('max-inline-size', '100000px')
     renderer.setAttribute('max-block-size', '100000px')
     renderer.setAttribute('max-column-count', '1')
     // Foliate applies this stylesheet to subsequent sections too.
     renderer.setStyles(`
-        html { font-size: ${settings.fontSize}px !important;
-            color: ${foreground} !important; background: ${background} !important;
-            color-scheme: ${settings.theme === 'night' ? 'dark' : 'light'}; }
+        ${fontURL ? `@font-face { font-family: ReaderCustom; src: url("${fontURL}"); font-display: swap; }` : ''}
+        html { font-size: ${settings.fontSize}px !important; }
+        html, body { background: transparent !important; }
+        body, p, li, blockquote, dd, div, span, h1, h2, h3, h4, h5, h6 {
+            font-family: ${family} !important; }
         body { color: inherit !important; background: transparent !important;
-            font-family: ${settings.serif ? 'serif' : 'sans-serif'} !important;
             font-weight: ${settings.fontWeight} !important;
             padding: 0 !important; box-sizing: border-box !important;
             line-height: ${settings.lineHeight} !important; }
         p, li, blockquote, dd { line-height: ${settings.lineHeight} !important; }
         p { text-indent: 2em; margin-block: 0 ${settings.paragraphSpacing}em !important; }
-        a { color: ${link} !important; }
         pre { white-space: pre-wrap !important; }
+        figure { margin: 0 auto !important; padding: 0 !important;
+            text-indent: 0 !important; max-inline-size: 100% !important;
+            break-inside: avoid !important; }
+        img, figure > svg { display: block !important; margin-inline: auto !important;
+            text-indent: 0 !important; max-inline-size: 100% !important;
+            max-block-size: calc(100vh - ${settings.pageMargin * 2}px) !important;
+            object-fit: contain !important; break-inside: avoid !important; }
+        p:has(> img), a:has(> img) { text-indent: 0 !important; }
     `)
+}
+function paintDocument(doc) {
+    const [background, foreground, link] = COLORS[settings.theme]
+    let style = doc.getElementById('reader-paint')
+    if (!style) {
+        style = doc.createElement('style')
+        style.id = 'reader-paint'
+        doc.head.append(style)
+    }
+    style.textContent = `html, body { background: transparent !important; }
+        html { color: ${foreground} !important; color-scheme: ${settings.theme === 'night' ? 'dark' : 'light'}; }
+        a { color: ${link} !important; }`
+}
+async function restoreCFI(cfi, token = generation) {
+    if (!cfi || token !== generation) return
+    const renderer = view.renderer
+    const docs = renderer.getContents().map(x => x.doc)
+    await Promise.all(docs.map(doc => doc.fonts?.ready))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    if (token === generation && !fault) await go(cfi)
 }
 
 function flatten(items = [], depth = 0) {
@@ -266,11 +345,33 @@ function publish() {
 }
 
 function bindDocument(doc, owner, token) {
-    let down, clickTimer
+    paintDocument(doc)
+    bindGestures(doc, token)
+    let down
     const selection = () => !doc.getSelection()?.isCollapsed
-    const cancel = () => { clearTimeout(clickTimer); down = null }
+    const cancel = () => { down = null }
     doc.addEventListener('pointerdown', event => {
-        clearTimeout(clickTimer)
+        // First tap turns immediately. A second tap restores the original
+        // anchor before selecting the original word; no artificial tap timer.
+        const previous = lastTap
+        if (previous && performance.now() - previous.time >= 350) lastTap = null
+        if (previous && previous.token === token && performance.now() - previous.time < 350
+            && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 24) {
+            previous.double = true
+            commands({ type: 'restoreCFI', cfi: previous.cfi }).then(() => {
+                let range = previous.range
+                if (!range?.startContainer.isConnected && previous.wordCFI) {
+                    const resolved = view.resolveCFI(previous.wordCFI)
+                    const content = view.renderer.getContents().find(x => x.index === resolved?.index)
+                    if (content) range = resolved.anchor(content.doc)
+                }
+                if (range?.startContainer.isConnected && token === generation) {
+                    const selected = range.startContainer.ownerDocument.getSelection()
+                    selected.removeAllRanges()
+                    selected.addRange(range)
+                }
+            })
+        }
         down = event.isPrimary && event.button === 0 ? {
             x: event.clientX, y: event.clientY, time: performance.now(),
             selected: selection(), moved: false,
@@ -283,12 +384,10 @@ function bindDocument(doc, owner, token) {
         }
     }, { passive: true })
     doc.addEventListener('pointercancel', cancel, { passive: true })
-    doc.addEventListener('selectionchange', () => { if (selection()) clearTimeout(clickTimer) })
     doc.addEventListener('dblclick', cancel)
     doc.addEventListener('click', event => {
-        clearTimeout(clickTimer)
         const element = event.target.nodeType === 1 ? event.target : event.target.parentElement
-        if (!down || down.moved || down.selected || selection() || event.detail > 1
+        if (!down || down.moved || down.selected || selection() || event.detail > 1 || lastTap?.double
             || performance.now() - down.time > 350 || event.defaultPrevented
             || element?.closest('a, button, input, textarea, select, label, audio, video, [contenteditable]')) return
         const frame = doc.defaultView.frameElement
@@ -297,13 +396,72 @@ function bindDocument(doc, owner, token) {
         const x = event.clientX * rect.width / frame.clientWidth + rect.left - bounds.left
         const ratio = x / bounds.width
         down = null
-        clickTimer = setTimeout(() => {
-            if (token !== generation || selection()) return
-            if (ratio < .3) commands({ type: book.dir === 'rtl' ? 'next' : 'prev' })
-            else if (ratio > .7) commands({ type: book.dir === 'rtl' ? 'prev' : 'next' })
-            else send({ type: 'tap' })
-        }, 240)
+        if (token !== generation || selection()) return
+        const range = doc.caretRangeFromPoint?.(event.clientX, event.clientY)
+        if (range?.startContainer.nodeType === 3) {
+            const node = range.startContainer, offset = range.startOffset
+            const segment = [...new Intl.Segmenter(undefined, { granularity: 'word' }).segment(node.data)]
+                .find(s => s.index <= offset && s.index + s.segment.length > offset)
+            if (segment) { range.setStart(node, segment.index); range.setEnd(node, segment.index + segment.segment.length) }
+        }
+        const index = view.renderer.getContents().find(x => x.doc === doc)?.index
+        const wordCFI = range && Number.isInteger(index) ? view.getCFI(index, range) : undefined
+        lastTap = { token, time: performance.now(), x: event.clientX, y: event.clientY,
+            cfi: latest?.cfi, range, wordCFI }
+        if (ratio < .3) commands({ type: book.dir === 'rtl' ? 'next' : 'prev' })
+        else if (ratio > .7) commands({ type: book.dir === 'rtl' ? 'prev' : 'next' })
+        else send({ type: 'tap' })
     })
+}
+function bindGestures(target, token) {
+    let gesture
+    const selected = () => view?.renderer?.getContents().some(({ doc }) => !doc.getSelection()?.isCollapsed)
+    const curl = () => settings.turnAnimation !== 'none' && !settings.scroll && !view?.isFixedLayout
+    const opts = { capture: true, passive: false }
+    target.addEventListener('touchstart', event => {
+        const t = event.touches[0]
+        gesture = event.touches.length === 1 ? { x: t.clientX, y: t.clientY,
+            time: performance.now(), dx: 0, axis: null, blocked: selected() } : null
+        // Keep all core touch state out of curl mode, including tiny moves and
+        // touchend's unconditional snap. Do not prevent browser selection.
+        if (curl()) event.stopImmediatePropagation()
+    }, opts)
+    target.addEventListener('touchmove', event => {
+        if (curl()) event.stopImmediatePropagation()
+        const g = gesture, t = event.touches[0]
+        if (!g || !t || token !== generation) return
+        if (event.touches.length !== 1 || selected()) {
+            g.blocked = true
+            if (selected()) event.stopImmediatePropagation()
+            return
+        }
+        const dx = t.clientX - g.x, dy = t.clientY - g.y
+        g.dx = dx
+        if (!g.axis && Math.hypot(dx, dy) > 10) {
+            g.axis = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'x' : 'y'
+            if (performance.now() - g.time > 350) g.blocked = true
+            send({ type: 'interaction', kind: 'swipe' })
+        }
+        if (g.axis) touchUntil = performance.now() + (curl() ? 0 : 400)
+        if (curl() && g.axis === 'x' && !g.blocked) event.preventDefault()
+    }, opts)
+    target.addEventListener('touchend', event => {
+        const g = gesture
+        gesture = null
+        if (!curl()) return
+        event.stopImmediatePropagation()
+        if (!g || g.blocked || selected() || g.axis !== 'x' || Math.abs(g.dx) < 35) return
+        event.preventDefault()
+        commands({ type: (g.dx < 0) !== (book.dir === 'rtl') ? 'next' : 'prev' })
+    }, opts)
+    target.addEventListener('touchcancel', event => {
+        gesture = null
+        if (curl()) event.stopImmediatePropagation()
+    }, opts)
+    target.addEventListener('wheel', () => send({ type: 'interaction', kind: 'swipe' }), { passive: true })
+    target.addEventListener('scroll', () => {
+        if (!working) send({ type: 'interaction', kind: 'swipe' })
+    }, { capture: true, passive: true })
 }
 
 function checkTarget(target) {
@@ -348,7 +506,7 @@ async function boot(target) {
     try { view?.close() } catch { /* Upstream destroy may run before its first document. */ }
     view?.remove()
     book?.destroy?.()
-    view = book = latest = pagination = undefined
+    view = book = latest = pagination = styleKey = lastTap = pendingPage = undefined
     fault = undefined
     ready = pendingLoaded = false
     controller = new AbortController()
@@ -407,6 +565,7 @@ async function boot(target) {
     })
     document.body.append(owner)
     await owner.open(book)
+    bindGestures(owner.renderer, token)
     // Capture at renderer target before View converts section fractions into
     // whole-book progress. No vendor patch and no estimated location counts.
     owner.renderer.addEventListener('relocate', ({ detail }) => {
@@ -415,7 +574,7 @@ async function boot(target) {
         if (!view.isFixedLayout && !settings.scroll && Number.isFinite(size) && size > 0) {
             const pageCount = Math.max(1, Math.round(1 / size))
             const offset = Math.round(fraction / size)
-            pagination = { pageCount, page: Math.max(1, Math.min(pageCount, offset + 1)),
+            pagination = { index: detail.index, fraction, size, pageCount, page: Math.max(1, Math.min(pageCount, offset + 1)),
                 padding: offset < 0 || offset >= pageCount }
         } else pagination = { page: 0, pageCount: 0, padding: false }
     }, { capture: true })
@@ -436,12 +595,13 @@ async function boot(target) {
 async function execute(command) {
     if (command.type === 'settings') {
         const next = cleanSettings(command.settings)
-        const layoutChanged = ['fontSize', 'fontWeight', 'lineHeight', 'paragraphSpacing',
-            'pageMargin', 'theme', 'scroll', 'serif'].some(key => settings[key] !== next[key])
-        const animationChanged = settings.animatedPage !== next.animatedPage
+        const layoutChanged = layoutKeys.some(key => settings[key] !== next[key])
+        const anchor = latest?.cfi
         settings = next
-        if (!fault && layoutChanged) applySettings()
-        else if (animationChanged) view?.renderer?.toggleAttribute('animated', settings.animatedPage)
+        if (!fault) {
+            applySettings()
+            if (layoutChanged && ready) await restoreCFI(anchor)
+        }
         return
     }
     if (command.type === 'retry') {
@@ -458,8 +618,23 @@ async function execute(command) {
         await go(anchor)
         pendingLoaded = true
     }
-    await sleep(Math.max(0, touchUntil - performance.now()))
-    if (command.type === 'goto') {
+    if (command.type === 'restoreCFI') {
+        await go(command.cfi)
+    } else if (command.type === 'page') {
+        const index = latest?.section?.current ?? view.resolveCFI(latest.cfi)?.index
+        // A drag belongs to the section where it began; never load another.
+        if (view.isFixedLayout || settings.scroll || command.sectionIndex !== index
+            || pagination?.index !== index || !(pagination.size > 0)) return
+        const page = Math.max(1, Math.min(pagination.pageCount, command.page))
+        const lastFraction = (pagination.pageCount - 1) * pagination.size
+        // Relocate emits (page-1)/N, but numeric anchors use round(a*(N-1)).
+        const anchor = lastFraction > 0 ? (page - 1) * pagination.size / lastFraction : 0
+        send({ type: 'interaction', kind: 'turn', source: 'slider' })
+        retryTarget = latest.cfi
+        view.renderer.removeAttribute('animated')
+        await deadline(view.renderer.goTo({ index, anchor }))
+        if (fault) throw fault
+    } else if (command.type === 'goto') {
         if (typeof command.href !== 'string' || !command.href) throw new Error('无效的章节链接')
         await go(command.href)
     } else if (command.type === 'section') {
@@ -474,24 +649,71 @@ async function execute(command) {
     } else {
         activeTarget = undefined
         retryTarget = latest?.cfi ?? 0
-        await deadline(command.type === 'next' ? view.next() : view.prev())
+        send({ type: 'interaction', kind: 'turn' })
+        const renderer = view.renderer
+        const native = command.type === 'nativeTurn'
+        if (native) renderer.removeAttribute('animated')
+        try {
+            await deadline((command.type === 'next' || (native && command.direction === 1))
+                ? view.next() : view.prev())
+        } finally {
+            renderer.removeAttribute('animated')
+        }
         if (fault) throw fault
     }
     publish()
 }
 function commands(command) {
-    if (!command || !['next', 'prev', 'section', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
+    if (!command || !['next', 'prev', 'nativeTurn', 'page', 'restoreCFI', 'section', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
         return Promise.resolve()
+    if (command.type === 'nativeTurn' && command.direction !== 1 && command.direction !== -1)
+        return Promise.resolve()
+    if ((command.type === 'next' || command.type === 'prev') && settings.turnAnimation !== 'none' && !settings.scroll) {
+        send({ type: 'interaction', kind: 'turn' })
+        send({ type: 'turn', direction: command.type === 'next' ? 1 : -1 })
+        return Promise.resolve()
+    }
+    if (command.type === 'page') {
+        if (!Number.isInteger(command.page) || (command.sectionIndex !== undefined
+            && !Number.isInteger(command.sectionIndex))) return Promise.resolve()
+        pendingPage = { ...command, sectionIndex: command.sectionIndex
+            ?? latest?.section?.current ?? pagination?.index }
+        if (pageDrain) return pageDrain
+        // Exactly one queue slot; replace the pending target during every await.
+        pageDrain = serial = serial.then(async () => {
+            working = true
+            try {
+                while (pendingPage) {
+                    const target = pendingPage
+                    pendingPage = undefined
+                    try { await execute(target) } catch (error) { fail(error) }
+                }
+            } finally {
+                activeTarget = undefined
+                working = false
+                pageDrain = undefined
+                publish()
+            }
+        })
+        return pageDrain
+    }
     const turn = command.type === 'next' || command.type === 'prev' || command.type === 'section'
     if (turn && turnQueued) return serial
     if (turn) turnQueued = true
+    if (['section', 'goto', 'fraction'].includes(command.type))
+        send({ type: 'interaction', kind: 'turn' })
     serial = serial.then(async () => {
         working = true
+        const before = `${latest?.section?.current}:${pagination?.page}:${latest?.cfi}`
         try { await execute(command) } catch (error) { fail(error) }
         finally {
             activeTarget = undefined
             working = false
             if (turn) turnQueued = false
+            if (command.type === 'nativeTurn') {
+                const after = `${latest?.section?.current}:${pagination?.page}:${latest?.cfi}`
+                send({ type: 'turnEnd', direction: command.direction, changed: before !== after && !fault })
+            }
         }
     })
     return serial

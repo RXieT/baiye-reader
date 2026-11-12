@@ -165,7 +165,7 @@ class WenkuRepository(context: Context, baseClient: OkHttpClient) {
             if (cache.isFile) return cache.readBytes().let { data ->
                 (data to imageMime(data)).also { imageMemory.put(name, it) }
             }
-            val data = imageMemory.get(name)?.first ?: bytes(Request.Builder().url(safe).build(), 16 * 1024 * 1024)
+            val data = imageMemory.get(name)?.first ?: imageBytes(safe)
             val result = data to imageMime(data)
             imageMemory.put(name, result)
             val atomic = AtomicFile(cache)
@@ -185,6 +185,42 @@ class WenkuRepository(context: Context, baseClient: OkHttpClient) {
         if (!File(File(folder, bookId), "${chapter.id}.xhtml").isFile) throw IOException("无法写入缓存")
         val keys = Jsoup.parse(html).select("img[src]").map { it.attr("src").substringAfter("/image/", "") }.filter { it.isNotEmpty() }.distinct()
         coroutineScope { keys.chunked(2).forEach { group -> group.map { key -> async { image(key, requireStored = true) } }.awaitAll() } }
+    }
+
+    private fun imageBytes(original: String): ByteArray {
+        val parsed = java.net.URI(original)
+        val publicPictureHost = parsed.host in setOf("pic.wenku8.com", "pic.wenku8.cn", "pic.wenku8.net", "img.wenku8.com")
+        val publicImagePath = parsed.path.startsWith("/pictures/") || parsed.path.startsWith("/image/")
+        val candidates = mutableListOf(original)
+        if (publicPictureHost && publicImagePath) {
+            val alternate = java.net.URI(if (parsed.scheme == "https") "http" else "https", null, parsed.host, -1, parsed.path, parsed.query, null).toASCIIString()
+            candidates += alternate
+        }
+        var lastFailure: IOException? = null
+        for (candidate in candidates.distinct()) {
+            var next = candidate
+            try {
+                for (hop in 0..3) {
+                    val request = Request.Builder().url(next)
+                        .header("Referer", "https://www.wenku8.net/")
+                        .header("User-Agent", System.getProperty("http.agent") ?: "Baiye/1.2 Android")
+                        .header("Accept", "image/avif,image/webp,image/*;q=0.9").build()
+                    client.newCall(request).execute().use { response ->
+                        if (response.code in setOf(301, 302, 303, 307, 308)) {
+                            val location = response.header("Location") ?: throw IOException("图片跳转无效")
+                            val resolved = response.request.url.resolve(location) ?: throw IOException("图片跳转无效")
+                            next = imageUrl(resolved.toString())
+                        } else {
+                            val result = readResponse(response, 16 * 1024 * 1024)
+                            imageMime(result)
+                            return result
+                        }
+                    }
+                }
+                throw IOException("图片跳转过多")
+            } catch (failure: IOException) { lastFailure = failure }
+        }
+        throw lastFailure ?: IOException("图片暂不可用")
     }
 
     private fun imageMime(bytes: ByteArray): String = when {
@@ -362,7 +398,7 @@ object WenkuParser {
             runCatching { imageUrl(marker.groupValues[1].trim()) }.getOrNull()?.let { url ->
                 val key = Base64.getUrlEncoder().withoutPadding().encodeToString(url.toByteArray(Charsets.UTF_8))
                 doc.body().appendElement("figure").appendElement("img")
-                    .attr("src", "https://appassets.androidplatform.net/image/$key").attr("alt", "插图")
+                    .attr("src", "https://appassets.androidplatform.net/image/$key").attr("alt", "插图").attr("decoding", "async")
             }
             cursor = marker.range.last + 1
         }
@@ -379,5 +415,7 @@ internal fun imageUrl(value: String): String {
     val host = uri.host?.lowercase() ?: throw IOException("无效图片地址")
     require(uri.scheme in setOf("http", "https") && uri.userInfo == null && uri.port in setOf(-1, 443, 80))
     require(host.matches(Regex("(?:[a-z0-9-]+\\.)?wenku8\\.(?:com|net|cn|cc)"))) { "图片地址不受支持" }
-    return java.net.URI("https", null, host, -1, uri.path, uri.query, null).toASCIIString()
+    val cleartextHost = host in setOf("pic.wenku8.com", "pic.wenku8.cn", "pic.wenku8.net", "img.wenku8.com")
+    val scheme = if (uri.scheme == "http" && cleartextHost && (uri.path.startsWith("/pictures/") || uri.path.startsWith("/image/"))) "http" else "https"
+    return java.net.URI(scheme, null, host, -1, uri.path, uri.query, null).toASCIIString()
 }

@@ -131,6 +131,25 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         saveJob = app.ioScope.launch { saveProgress(value) }
     }
 
+    fun importFont(uri: android.net.Uri) = viewModelScope.launch {
+        try {
+            val font = app.media.importFont(uri)
+            app.library.settings(library.value.settings.copy(fontMode = "custom", fontFile = font.file, fontLabel = font.label))
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { android.widget.Toast.makeText(app, "无法导入字体", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+
+    fun importBackground(uri: android.net.Uri) = viewModelScope.launch {
+        try {
+            val background = app.media.importBackground(uri)
+            val current = library.value.settings
+            app.library.settings(current.copy(background = background.id,
+                theme = if (background.dark) "night" else current.theme.takeIf { it != "night" } ?: "paper",
+                backgroundPresets = current.backgroundPresets.filterNot { it.id == background.id } + background))
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { android.widget.Toast.makeText(app, "无法导入背景", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+
     override fun onCleared() {
         prefetchJob?.cancel()
         super.onCleared()

@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 /** UI state is immediate; transient filesystem failures are retried without interrupting reading. */
 class LibraryStore(context: Context, private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)) {
@@ -32,7 +33,11 @@ class LibraryStore(context: Context, private val scope: CoroutineScope = Corouti
     private var retryJob: Job? = null
 
     private fun readState(): LibraryState = try {
-        json.decodeFromString(file.openRead().bufferedReader().use { it.readText() })
+        val raw = file.openRead().bufferedReader().use { it.readText() }
+        val decoded = json.decodeFromString<LibraryState>(raw)
+        val settings = json.parseToJsonElement(raw).jsonObject["settings"]?.jsonObject
+        if (settings?.containsKey("turnAnimation") != true && !decoded.settings.animatedPage)
+            decoded.copy(settings = decoded.settings.copy(turnAnimation = "none")) else decoded
     } catch (_: java.io.FileNotFoundException) {
         LibraryState()
     } catch (error: SerializationException) {
@@ -109,4 +114,5 @@ class LibraryStore(context: Context, private val scope: CoroutineScope = Corouti
 
     suspend fun remove(id: String) = change { state -> state.copy(entries = state.entries.filterNot { it.book.id == id }) }
     suspend fun settings(settings: ReaderSettings) = change { it.copy(settings = settings) }
+    suspend fun appearance(appearance: AppAppearance) = change { it.copy(appearance = appearance) }
 }
