@@ -77,6 +77,21 @@ data class LibraryState(
     val entries: List<ShelfEntry> = emptyList(),
     val settings: ReaderSettings = ReaderSettings(),
     val appearance: AppAppearance = AppAppearance(),
+    val bookmarks: List<Bookmark> = emptyList(),
+)
+
+@Serializable
+data class Bookmark(
+    val id: String,
+    val bookId: String,
+    val chapter: String,
+    val cfi: String,
+    val chapterId: String = "",
+    val fraction: Double = 0.0,
+    val sectionIndex: Int = 0,
+    val page: Int = 1,
+    val excerpt: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
 )
 
 enum class CatalogOrder(val label: String, val value: String) {

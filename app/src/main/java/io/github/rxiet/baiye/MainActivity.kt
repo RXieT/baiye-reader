@@ -44,13 +44,17 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun BaiyeApp(vm: MainViewModel = viewModel()) {
+    private fun BaiyeApp(vm: MainViewModel = viewModel(), community: CommunityViewModel = viewModel()) {
         val catalog by vm.catalog.collectAsStateWithLifecycle()
         val library by vm.library.collectAsStateWithLifecycle()
         val detail by vm.detail.collectAsStateWithLifecycle()
+        val account by community.account.collectAsStateWithLifecycle()
+        val topics by community.topics.collectAsStateWithLifecycle()
+        val thread by community.thread.collectAsStateWithLifecycle()
         var screen by rememberSaveable { mutableStateOf("catalog") }
         var detailParent by rememberSaveable { mutableStateOf("catalog") }
         var settingsParent by rememberSaveable { mutableStateOf("catalog") }
+        var accountParent by rememberSaveable { mutableStateOf("settings") }
         val savedPages = rememberSaveableStateHolder()
         val scope = rememberCoroutineScope()
         val backdrop = rememberLayerBackdrop()
@@ -72,9 +76,14 @@ class MainActivity : ComponentActivity() {
             vm.messages.collect { Toast.makeText(this@MainActivity, it, Toast.LENGTH_SHORT).show() }
         }
         val goBack: () -> Unit = {
-            screen = when (screen) { "licenses" -> "settings"; "settings" -> settingsParent; "detail" -> detailParent; else -> "catalog" }
+            screen = when (screen) { "licenses" -> "settings"; "settings" -> settingsParent; "detail" -> detailParent
+                "account" -> accountParent; "comments" -> "detail"; "thread" -> "comments"; else -> "catalog" }
         }
         BackHandler(enabled = screen != "catalog", onBack = goBack)
+        val openAccount: () -> Unit = { accountParent = screen; screen = "account"; community.restoreAccount() }
+        LaunchedEffect(account.user?.id, screen) {
+            if (screen == "account" && account.user != null && accountParent in listOf("comments", "thread")) screen = accountParent
+        }
         val openSettings: () -> Unit = { settingsParent = screen; screen = "settings" }
         val rootScreen = screen == "catalog" || screen == "shelf"
         var lastRootTab by rememberSaveable { mutableIntStateOf(0) }
@@ -86,13 +95,14 @@ class MainActivity : ComponentActivity() {
                     targetState = screen,
                     modifier = Modifier.fillMaxSize().layerBackdrop(backdrop),
                     transitionSpec = {
-                        val direction = if (targetState in listOf("detail", "settings", "licenses") || (initialState == "catalog" && targetState == "shelf")) 1 else -1
+                        val direction = if (targetState in listOf("detail", "settings", "licenses", "account", "comments", "thread") || (initialState == "catalog" && targetState == "shelf")) 1 else -1
                         (fadeIn(tween(200)) + slideInHorizontally(tween(320, easing = FastOutSlowInEasing)) { it / 9 * direction }) togetherWith
                             (fadeOut(tween(140)) + slideOutHorizontally(tween(280, easing = FastOutSlowInEasing)) { -it / 12 * direction })
                     },
                     label = "pages",
                 ) { page ->
-                    savedPages.SaveableStateProvider(page) {
+                    val pageKey = when (page) { "comments" -> "$page:${topics.bookId}"; "thread" -> "$page:${thread.topic?.id}"; else -> page }
+                    savedPages.SaveableStateProvider(pageKey) {
                         when (page) {
                             "catalog" -> CatalogScreen(
                                 state = catalog, onSearch = vm::search, onOrder = vm::order,
@@ -122,6 +132,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onRetry = { vm.showBook(state.book) },
                                     onDownload = vm::download, onCancelDownload = vm::cancelDownload,
+                                    onComments = { community.showTopics(state.detail?.book ?: state.book); screen = "comments" },
                                 )
                             } ?: LaunchedEffect(Unit) { screen = "catalog" }
                             "settings" -> SettingsScreen(
@@ -130,7 +141,19 @@ class MainActivity : ComponentActivity() {
                                 onImportBackground = { backgroundImporter.launch(arrayOf("image/*")) },
                                 appearance = library.appearance, onAppearance = { vm.appearance(it) },
                                 onImportUiFont = { uiFontImporter.launch(fontTypes) },
+                                onDeleteReaderFont = { vm.deleteReaderFont() }, onDeleteBackground = { vm.deleteBackground(it) },
+                                onDeleteUiFont = { vm.deleteUiFont() }, onAccount = openAccount,
                             )
+                            "account" -> AccountScreen(account, community::login, { community.logout() }, goBack, community::restoreAccount)
+                            "comments" -> if (topics.bookId.isNotBlank()) TopicsScreen(topics, account.user != null,
+                                onTopic = { community.showThread(it); screen = "thread" },
+                                onMore = { community.loadTopics(more = true) }, onRetry = { community.loadTopics() },
+                                onLogin = openAccount, onPost = community::post, onBack = goBack)
+                            else LaunchedEffect(Unit) { screen = "catalog" }
+                            "thread" -> if (thread.topic != null) ThreadScreen(thread, account.user != null,
+                                onMore = { community.loadReplies(more = true) }, onRetry = { community.loadReplies() },
+                                onLogin = openAccount, onReply = community::reply, onBack = goBack)
+                            else LaunchedEffect(Unit) { screen = if (topics.bookId.isBlank()) "catalog" else "comments" }
                             "licenses" -> LicensesScreen(onBack = goBack)
                         }
                     }

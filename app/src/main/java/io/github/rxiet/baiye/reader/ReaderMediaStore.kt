@@ -21,6 +21,9 @@ class ReaderMediaStore(private val context: Context) {
     fun fontFile(name: String): File? = ownedFile(fonts, name)
     fun backgroundFile(name: String): File? = ownedFile(backgrounds, name)
 
+    suspend fun deleteFont(name: String) = withContext(Dispatchers.IO) { fontFile(name)?.delete(); Unit }
+    suspend fun deleteBackground(name: String) = withContext(Dispatchers.IO) { backgroundFile(name)?.delete(); Unit }
+
     suspend fun importFont(uri: Uri): ImportedFont = withContext(Dispatchers.IO) {
         val temp = copyBounded(uri, fonts, 32L * 1024 * 1024)
         try {

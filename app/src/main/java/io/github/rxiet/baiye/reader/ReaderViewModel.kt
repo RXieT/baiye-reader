@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -41,6 +42,9 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), library.value.settings)
     private val mutableDocument = MutableStateFlow<ReaderDocument?>(null)
     val document = mutableDocument.asStateFlow()
+    val bookmarks = combine(library, document) { state, active ->
+        state.bookmarks.filter { it.bookId == active?.entry?.book?.id }.sortedByDescending { it.createdAt }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val error = MutableStateFlow<String?>(null)
     val toc = MutableStateFlow<List<ReaderToc>>(emptyList())
     val ready = MutableStateFlow(false)
@@ -130,6 +134,32 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         saveJob?.cancel()
         saveJob = app.ioScope.launch { saveProgress(value) }
     }
+
+    fun addBookmark(excerpt: String = "", cfi: String = progress.value.cfi) = viewModelScope.launch {
+        val id = document.value?.entry?.book?.id ?: return@launch
+        val position = progress.value
+        if (ready.value && cfi.isNotBlank() && cfi == position.cfi) app.library.addBookmark(id, position, excerpt)
+    }
+
+    fun removeBookmark(bookmark: Bookmark) = viewModelScope.launch { app.library.removeBookmark(bookmark.id) }
+
+    fun bookmarkTarget(bookmark: Bookmark): String? {
+        val active = document.value ?: return null
+        if (bookmark.bookId != active.entry.book.id) return null
+        if (!active.entry.book.local && bookmark.chapterId.isNotBlank()) {
+            val index = active.manifest.chapters.indexOfFirst { it.id == bookmark.chapterId }
+            if (index < 0) return null
+            if (index != bookmark.sectionIndex)
+                return "https://appassets.androidplatform.net/chapter/${active.entry.book.id}/${bookmark.chapterId}.xhtml"
+        }
+        return bookmark.cfi
+    }
+
+    fun bookmarkSectionIndex(bookmark: Bookmark): Int = document.value?.takeUnless { it.entry.book.local }
+        ?.manifest?.chapters?.indexOfFirst { it.id == bookmark.chapterId } ?: bookmark.sectionIndex
+
+    fun deleteFont() = viewModelScope.launch { app.deleteReaderFont() }
+    fun deleteBackground(preset: BackgroundPreset) = viewModelScope.launch { app.deleteBackground(preset.id) }
 
     fun importFont(uri: android.net.Uri) = viewModelScope.launch {
         try {

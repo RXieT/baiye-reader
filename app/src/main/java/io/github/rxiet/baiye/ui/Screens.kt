@@ -3,6 +3,7 @@ package io.github.rxiet.baiye.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import io.github.rxiet.baiye.data.AppAppearance
 import androidx.compose.animation.core.animateFloatAsState
@@ -97,6 +98,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import io.github.rxiet.baiye.data.Book
+import io.github.rxiet.baiye.data.BackgroundPreset
 import io.github.rxiet.baiye.data.CatalogOrder
 import io.github.rxiet.baiye.data.CatalogState
 import io.github.rxiet.baiye.data.Chapter
@@ -362,6 +364,7 @@ fun DetailScreen(
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
     progress: ReadingProgress? = null,
+    onComments: () -> Unit = {},
 ) {
     val detail = state.detail
     val book = detail?.book ?: state.book
@@ -369,11 +372,9 @@ fun DetailScreen(
     val volumes = remember(detail) { detail?.chapters?.groupBy { it.volume }.orEmpty() }
     val currentVolume = detail?.chapters?.firstOrNull { it.id == progress?.chapterId }?.volume
     var expandedVolumes by rememberSaveable(book.id) { mutableStateOf(arrayListOf<String>()) }
-    var volumesInitialized by rememberSaveable(book.id) { mutableStateOf(false) }
-    LaunchedEffect(detail != null, currentVolume) {
-        if (!volumesInitialized && detail != null) {
-            expandedVolumes = arrayListOf<String>().apply { currentVolume?.let { add(it) } }
-            volumesInitialized = true
+    LaunchedEffect(book.id, currentVolume) {
+        if (currentVolume != null && currentVolume !in expandedVolumes) {
+            expandedVolumes = ArrayList(expandedVolumes).apply { add(currentVolume) }
         }
     }
     Column(Modifier.fillMaxSize().background(Color.White)) {
@@ -444,8 +445,27 @@ fun DetailScreen(
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (detail.chapters.isNotEmpty()) {
-                            ActionButton(if (!progress?.cfi.isNullOrBlank()) "继续阅读" else "阅读",
-                                { onRead(null) }, Modifier.fillMaxWidth(), primary = true)
+                            val continuing = !progress?.cfi.isNullOrBlank()
+                            val currentChapter = detail.chapters.firstOrNull { it.id == progress?.chapterId }
+                            Button(
+                                onClick = { onRead(null) },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                                    .semantics(mergeDescendants = true) {},
+                                minHeight = 56.dp,
+                                cornerRadius = 12.dp,
+                                colors = ButtonDefaults.buttonColors(color = Ink, contentColor = Color.White),
+                            ) {
+                                Column(Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(if (continuing) "继续阅读" else "阅读",
+                                        fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                                    if (continuing && currentChapter != null) {
+                                        Text(currentChapter.title, fontSize = 14.sp, lineHeight = 20.sp,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             ActionButton(
@@ -457,6 +477,9 @@ fun DetailScreen(
                                 Modifier.weight(1f),
                                 enabled = state.downloading || detail.chapters.isNotEmpty(),
                             )
+                        }
+                        if (!book.local) {
+                            ActionButton("评论", onComments, Modifier.fillMaxWidth())
                         }
                         if (state.downloading || state.total > 0) {
                             Text("缓存 ${state.downloaded} / ${state.total}", fontSize = 14.sp, color = Muted)
@@ -477,7 +500,9 @@ fun DetailScreen(
                     val volumeExpanded = volume in expandedVolumes
                     item(key = "volume:$volume") {
                         Row(
-                            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            Modifier.animateItem(fadeInSpec = tween(160), placementSpec = tween(160),
+                                fadeOutSpec = tween(160)).fillMaxWidth().heightIn(min = 48.dp)
+                                .semantics { contentDescription = "${volume.ifBlank { "正文" }}，${if (volumeExpanded) "收起" else "展开"}" }
                                 .clickable(role = Role.Button) {
                                     expandedVolumes = ArrayList(expandedVolumes).apply {
                                         if (volumeExpanded) remove(volume) else add(volume)
@@ -485,8 +510,10 @@ fun DetailScreen(
                                 }.padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(if (volumeExpanded) "−" else "+", Modifier.width(32.dp),
-                                fontSize = 22.sp, color = Muted)
+                            val rotation by animateFloatAsState(if (volumeExpanded) 180f else 0f,
+                                tween(160), label = "volumeExpansion")
+                            Icon(ExpandGlyph, contentDescription = null, tint = Muted,
+                                modifier = Modifier.width(32.dp).graphicsLayer { rotationZ = rotation })
                             Text(volume.ifBlank { "正文" }, Modifier.weight(1f),
                                 fontSize = 20.sp, lineHeight = 28.sp,
                                 fontWeight = FontWeight.SemiBold, color = Ink)
@@ -495,7 +522,8 @@ fun DetailScreen(
                     }
                     if (volumeExpanded) items(chapters, key = { it.id }) { chapter ->
                         Column(
-                            Modifier.fillMaxWidth()
+                            Modifier.animateItem(fadeInSpec = tween(160), placementSpec = tween(160),
+                                fadeOutSpec = tween(160)).fillMaxWidth()
                                 .clickable(role = Role.Button) { onRead(chapter) },
                         ) {
                             Text(chapter.title,
@@ -523,9 +551,14 @@ fun SettingsScreen(
     appearance: AppAppearance = AppAppearance(),
     onAppearance: (AppAppearance) -> Unit = {},
     onImportUiFont: () -> Unit = {},
+    onDeleteReaderFont: () -> Unit = {},
+    onDeleteBackground: (BackgroundPreset) -> Unit = {},
+    onDeleteUiFont: () -> Unit = {},
+    onAccount: () -> Unit = {},
 ) {
     var category by rememberSaveable { mutableStateOf(0) }
     var typeSection by rememberSaveable { mutableStateOf(0) }
+    var confirmDeleteUiFont by remember(appearance.fontFile) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().background(Color.White)) {
         Header("设置", onBack)
         ChoiceRow(listOf("排版", "外观", "阅读", "界面"), category, { category = it },
@@ -534,22 +567,39 @@ fun SettingsScreen(
             ChoiceRow(listOf("间距", "字体"), typeSection, { typeSection = it },
                 Modifier.padding(horizontal = 24.dp))
         }
+        PreferencePage(category to typeSection, Modifier.weight(1f)) {
         if (category == 3) {
-            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(24.dp),
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("界面字体", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                 Text(appearance.fontLabel, fontSize = 14.sp, color = Muted)
+                if (appearance.fontFile.isNotBlank()) {
+                    PlainTextButton("删除并恢复系统字体", { confirmDeleteUiFont = true },
+                        Modifier.fillMaxWidth(), textColor = Color(0xFFB3261E))
+                }
                 ActionButton("跟随系统", { onAppearance(AppAppearance()) }, Modifier.fillMaxWidth(),
                     primary = appearance.fontFile.isBlank())
                 ActionButton("导入界面字体", onImportUiFont, Modifier.fillMaxWidth())
+                PlainTextButton("账号", onAccount, Modifier.fillMaxWidth().height(48.dp))
                 PlainTextButton("开源许可", onLicenses, Modifier.fillMaxWidth())
             }
         } else {
             PreferencesContent(settings, onChange,
                 when (category) { 0 -> if (typeSection == 0) "type" else "font"; 1 -> "background"; else -> "more" },
-                Modifier.weight(1f), onImportFont = onImportReaderFont,
-                onImportBackground = onImportBackground)
+                Modifier.fillMaxSize(), onImportFont = onImportReaderFont,
+                onImportBackground = onImportBackground, onDeleteFont = onDeleteReaderFont,
+                onDeleteBackground = onDeleteBackground)
         }
+        }
+    }
+    if (confirmDeleteUiFont && appearance.fontFile.isNotBlank()) {
+        ResourceDeleteConfirmation(
+            title = "删除界面字体",
+            name = appearance.fontLabel.ifBlank { "已导入界面字体" },
+            message = "删除后将恢复系统字体，此操作无法撤销。",
+            onDismiss = { confirmDeleteUiFont = false },
+            onConfirm = { confirmDeleteUiFont = false; onDeleteUiFont() },
+        )
     }
 }
 
@@ -560,11 +610,31 @@ fun ReadingPreferences(
     section: String = "type",
     onImportFont: () -> Unit = {},
     onImportBackground: () -> Unit = {},
+    onDeleteFont: () -> Unit = {},
+    onDeleteBackground: (BackgroundPreset) -> Unit = {},
 ) {
-    PreferencesContent(settings, onChange, section, Modifier.fillMaxSize(),
-        onImportFont = onImportFont, onImportBackground = onImportBackground)
+    PreferencePage(section, Modifier.fillMaxSize()) {
+        PreferencesContent(settings, onChange, section, Modifier.fillMaxSize(),
+            onImportFont = onImportFont, onImportBackground = onImportBackground,
+            onDeleteFont = onDeleteFont, onDeleteBackground = onDeleteBackground)
+    }
 }
 
+// Only the category key restarts the transition; slider updates never replay the page.
+@Composable
+private fun PreferencePage(page: Any, modifier: Modifier, content: @Composable () -> Unit) {
+    val reveal = remember { Animatable(1f) }
+    LaunchedEffect(page) {
+        reveal.snapTo(0f)
+        reveal.animateTo(1f, tween(165))
+    }
+    Box(modifier.graphicsLayer {
+        alpha = reveal.value
+        translationX = (1f - reveal.value) * 12.dp.toPx()
+    }) { content() }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PreferencesContent(
     settings: ReaderSettings,
@@ -573,9 +643,17 @@ private fun PreferencesContent(
     modifier: Modifier,
     onImportFont: () -> Unit = {},
     onImportBackground: () -> Unit = {},
+    onDeleteFont: () -> Unit = {},
+    onDeleteBackground: (BackgroundPreset) -> Unit = {},
 ) {
     val latest by rememberUpdatedState(settings)
     val change by rememberUpdatedState(onChange)
+    var confirmDeleteFont by remember(settings.fontFile) { mutableStateOf(false) }
+    var manageBackgrounds by rememberSaveable { mutableStateOf(false) }
+    var pendingBackground by remember(settings.backgroundPresets) { mutableStateOf<BackgroundPreset?>(null) }
+    val customBackgrounds = settings.backgroundPresets.filterNot {
+        it.id in listOf("none", "paper", "linen", "mist")
+    }
     var fontSize by remember(settings.fontSize) { mutableStateOf(settings.fontSize.toFloat()) }
     var fontWeight by remember(settings.fontWeight) { mutableStateOf(settings.fontWeight.toFloat()) }
     var lineHeight by remember(settings.lineHeight) { mutableStateOf(settings.lineHeight.toFloat()) }
@@ -596,6 +674,8 @@ private fun PreferencesContent(
     ) {
         if (section == "type" || section == "font") {
             item(key = "preview") { ReadingPreview(preview) }
+        }
+        if (section == "type") {
             item(key = "size") {
                 Column {
                     PreferenceSlider("字号", fontSize, fontSize.roundToInt().toString(), 16f..32f, 15,
@@ -609,15 +689,26 @@ private fun PreferencesContent(
                     val modes = listOf("system" to "跟随系统", "serif" to "宋体", "sans" to "黑体") +
                         if (settings.fontFile.isNotBlank()) listOf("custom" to settings.fontLabel.ifBlank { "已导入字体" }) else emptyList()
                     modes.forEach { (mode, label) ->
+                        val active = settings.fontMode == mode
+                        val selectionColor by animateColorAsState(
+                            if (active) MiuixTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+                            tween(160), label = "fontSelection")
+                        val checkAlpha by animateFloatAsState(if (active) 1f else 0f,
+                            tween(160), label = "fontCheck")
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (settings.fontMode == mode) MiuixTheme.colorScheme.surfaceContainerHigh else Color.Transparent)
+                            .background(selectionColor)
                             .semantics { selected = settings.fontMode == mode }
                             .clickable(role = Role.RadioButton) {
                                 change(latest.copy(fontMode = mode, serif = mode == "serif"))
                             }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(label, Modifier.weight(1f), fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
-                            if (settings.fontMode == mode) Text("✓", fontSize = 16.sp, color = Accent)
+                            Text("✓", Modifier.graphicsLayer { alpha = checkAlpha }, fontSize = 16.sp, color = Accent)
+                            if (mode == "custom") {
+                                PlainTextButton("删除", { confirmDeleteFont = true },
+                                    Modifier.semantics { contentDescription = "删除阅读字体：$label" },
+                                    textColor = Color(0xFFB3261E))
+                            }
                         }
                     }
                     ActionButton("导入阅读字体", onImportFont, Modifier.fillMaxWidth())
@@ -650,12 +741,16 @@ private fun PreferencesContent(
                     BackgroundChoices(settings.theme) { change(latest.copy(theme = it)) }
                     Text("背景纹理", fontSize = 16.sp, color = MiuixTheme.colorScheme.onSurface)
                     val backgrounds = listOf("none" to "无", "paper" to "纸张", "linen" to "亚麻", "mist" to "薄雾") +
-                        settings.backgroundPresets.map { it.id to it.name }
+                        customBackgrounds.map { it.id to it.name }
                     backgrounds.chunked(2).forEach { pair ->
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             pair.forEach { (id, name) ->
-                                val preset = settings.backgroundPresets.firstOrNull { it.id == id }
+                                val preset = customBackgrounds.firstOrNull { it.id == id }
                                 val active = settings.background == id
+                                val borderColor by animateColorAsState(if (active) Accent else Line,
+                                    tween(160), label = "textureSelection")
+                                val borderWidth by animateFloatAsState(if (active) 2f else 1f,
+                                    tween(160), label = "textureBorder")
                                 Box(Modifier.weight(1f).height(72.dp).clip(RoundedCornerShape(12.dp))
                                     .background(when (id) {
                                         "paper" -> Color(0xFFF2E7CF)
@@ -663,15 +758,20 @@ private fun PreferencesContent(
                                         "mist" -> Color(0xFFE4EBED)
                                         else -> if (preset?.dark == true) Color(0xFF303030) else Soft
                                     })
-                                    .border(if (active) 2.dp else 1.dp, if (active) Accent else Line, RoundedCornerShape(12.dp))
+                                    .border(borderWidth.dp, borderColor, RoundedCornerShape(12.dp))
                                     .semantics { selected = active }
-                                    .clickable(role = Role.RadioButton) {
-                                        change(latest.copy(background = id, theme = when {
-                                            preset?.dark == true -> "night"
-                                            preset != null && latest.theme == "night" -> "paper"
-                                            else -> latest.theme
-                                        }))
-                                    },
+                                    .combinedClickable(
+                                        role = Role.RadioButton,
+                                        onClick = {
+                                            change(latest.copy(background = id, theme = when {
+                                                preset?.dark == true -> "night"
+                                                preset != null && latest.theme == "night" -> "paper"
+                                                else -> latest.theme
+                                            }))
+                                        },
+                                        onLongClick = if (preset != null) { { pendingBackground = preset } } else null,
+                                        onLongClickLabel = if (preset != null) "删除背景预设：$name" else null,
+                                    ),
                                     contentAlignment = Alignment.BottomStart) {
                                     if (preset != null) AsyncImage(model = (LocalContext.current.applicationContext as? BaiyeApplication)?.media?.backgroundFile(preset.file), contentDescription = null,
                                         modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -683,6 +783,27 @@ private fun PreferencesContent(
                         }
                     }
                     ActionButton("导入背景并保存预设", onImportBackground, Modifier.fillMaxWidth())
+                    ActionButton(if (manageBackgrounds) "收起预设管理" else "管理预设",
+                        { manageBackgrounds = !manageBackgrounds }, Modifier.fillMaxWidth())
+                    if (manageBackgrounds) {
+                        Text("内置背景不可删除", fontSize = 14.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        if (customBackgrounds.isEmpty()) {
+                            Text("暂无自定义背景预设", fontSize = 16.sp,
+                                color = MiuixTheme.colorScheme.onSurface)
+                        }
+                        customBackgrounds.forEach { preset ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(preset.name, Modifier.weight(1f), fontSize = 16.sp,
+                                    color = MiuixTheme.colorScheme.onSurface, maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis)
+                                PlainTextButton("删除", { pendingBackground = preset },
+                                    Modifier.semantics { contentDescription = "删除背景预设：${preset.name}" },
+                                    textColor = Color(0xFFB3261E))
+                            }
+                        }
+                    }
                     PreferenceSwitch("跟随系统亮度", settings.brightness < 0f) {
                         change(latest.copy(brightness = if (it) -1f else brightness.coerceIn(.1f, 1f)))
                     }
@@ -700,7 +821,7 @@ private fun PreferencesContent(
                         change(latest.copy(scroll = it == 1))
                     }
                     PreferenceSwitch("音量键翻页", settings.volumeKeys) { change(latest.copy(volumeKeys = it)) }
-                    SettingChoices("翻页动画", listOf("无动画", "现有", "翻书"),
+                    SettingChoices("翻页动画", listOf("无动画", "层叠", "翻书"),
                         listOf("none", "slide", "curl").indexOf(settings.turnAnimation)) {
                         change(latest.copy(turnAnimation = listOf("none", "slide", "curl")[it]))
                     }
@@ -709,6 +830,56 @@ private fun PreferencesContent(
                     PreferenceSwitch("全屏阅读", settings.immersive) { change(latest.copy(immersive = it)) }
                 }
             }
+        }
+    }
+    if (confirmDeleteFont && settings.fontFile.isNotBlank()) {
+        ResourceDeleteConfirmation(
+            title = "删除阅读字体",
+            name = settings.fontLabel.ifBlank { "已导入阅读字体" },
+            message = "将删除已导入的阅读字体，此操作无法撤销。",
+            onDismiss = { confirmDeleteFont = false },
+            onConfirm = { confirmDeleteFont = false; onDeleteFont() },
+        )
+    }
+    pendingBackground?.let { preset ->
+        ResourceDeleteConfirmation(
+            title = "删除背景预设",
+            name = preset.name,
+            message = "将删除此自定义背景预设，此操作无法撤销。",
+            onDismiss = { pendingBackground = null },
+            onConfirm = { pendingBackground = null; onDeleteBackground(preset) },
+        )
+    }
+}
+
+@Composable
+private fun ResourceDeleteConfirmation(
+    title: String,
+    name: String,
+    message: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                .background(MiuixTheme.colorScheme.surfaceContainerHigh)
+                .verticalScroll(rememberScrollState()).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            Text(title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold,
+                color = MiuixTheme.colorScheme.onSurface)
+            Text("确定删除“$name”吗？", fontSize = 17.sp, lineHeight = 26.sp,
+                color = MiuixTheme.colorScheme.onSurface)
+            Text(message, fontSize = 14.sp, lineHeight = 22.sp,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            TextButton(
+                text = "删除",
+                onClick = onConfirm,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                colors = ButtonDefaults.textButtonColors(color = Color(0xFFFCEBE9), textColor = Color(0xFFB3261E)),
+            )
+            PlainTextButton("取消", onDismiss, Modifier.fillMaxWidth())
         }
     }
 }
@@ -814,10 +985,16 @@ private fun BackgroundChoices(selectedTheme: String, onSelect: (String) -> Unit)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 pair.forEach { (theme, label) ->
                     val active = theme == selectedTheme
+                    val borderColor by animateColorAsState(if (active) Accent else Line,
+                        tween(160), label = "themeSelection")
+                    val borderWidth by animateFloatAsState(if (active) 2f else 1f,
+                        tween(160), label = "themeBorder")
+                    val indicatorAlpha by animateFloatAsState(if (active) 1f else 0f,
+                        tween(160), label = "themeIndicator")
                     Row(
                         Modifier.weight(1f).heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
                             .background(readingBackground(theme))
-                            .border(if (active) 2.dp else 1.dp, if (active) Accent else Line, RoundedCornerShape(12.dp))
+                            .border(borderWidth.dp, borderColor, RoundedCornerShape(12.dp))
                             .semantics { selected = active }
                             .clickable(role = Role.RadioButton) { onSelect(theme) }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -827,7 +1004,8 @@ private fun BackgroundChoices(selectedTheme: String, onSelect: (String) -> Unit)
                         val foreground = if (theme == "night") Color(0xFFE0DDD5) else Ink
                         Text(label, fontSize = 16.sp, fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
                             color = foreground)
-                        if (active) Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Accent))
+                        Box(Modifier.size(8.dp).graphicsLayer { alpha = indicatorAlpha }
+                            .clip(RoundedCornerShape(4.dp)).background(Accent))
                     }
                 }
             }
@@ -954,13 +1132,14 @@ private fun SettingsAction(onClick: () -> Unit) {
 }
 
 @Composable
-private fun PlainTextButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PlainTextButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier,
+    textColor: Color = MiuixTheme.colorScheme.onSurface) {
     TextButton(
         text = label,
         onClick = onClick,
         modifier = modifier.heightIn(min = 48.dp),
         minHeight = 48.dp,
-        colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = MiuixTheme.colorScheme.onSurface),
+        colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = textColor),
         textStyle = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium, fontFamily = LocalAppFont.current),
     )
 }
@@ -974,10 +1153,16 @@ private fun ChoiceRow(
 ) {
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         labels.forEachIndexed { index, label ->
-            Column(Modifier.weight(1f).semantics { selected = index == selectedIndex }) {
-                PlainTextButton(label, { onSelect(index) }, Modifier.fillMaxWidth())
-                Box(Modifier.fillMaxWidth().height(2.dp)
-                    .background(if (index == selectedIndex) Accent else MiuixTheme.colorScheme.dividerLine))
+            val active = index == selectedIndex
+            val indicatorColor by animateColorAsState(
+                if (active) Accent else MiuixTheme.colorScheme.dividerLine,
+                tween(160), label = "choiceIndicator")
+            val labelColor by animateColorAsState(
+                if (active) Accent else MiuixTheme.colorScheme.onSurface,
+                tween(160), label = "choiceLabel")
+            Column(Modifier.weight(1f).semantics { selected = active }) {
+                PlainTextButton(label, { onSelect(index) }, Modifier.fillMaxWidth(), textColor = labelColor)
+                Box(Modifier.fillMaxWidth().height(2.dp).background(indicatorColor))
             }
         }
     }

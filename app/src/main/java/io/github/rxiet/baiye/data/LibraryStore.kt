@@ -112,7 +112,47 @@ class LibraryStore(context: Context, private val scope: CoroutineScope = Corouti
         })
     }
 
-    suspend fun remove(id: String) = change { state -> state.copy(entries = state.entries.filterNot { it.book.id == id }) }
+    suspend fun remove(id: String) = change { state -> state.copy(
+        entries = state.entries.filterNot { it.book.id == id }, bookmarks = state.bookmarks.filterNot { it.bookId == id }) }
     suspend fun settings(settings: ReaderSettings) = change { it.copy(settings = settings) }
     suspend fun appearance(appearance: AppAppearance) = change { it.copy(appearance = appearance) }
+
+    suspend fun addBookmark(bookId: String, progress: ReadingProgress, excerpt: String) = change { state ->
+        if (progress.cfi.isBlank() || state.bookmarks.any { it.bookId == bookId && it.cfi == progress.cfi }) state
+        else state.copy(bookmarks = state.bookmarks + Bookmark(
+            id = java.util.UUID.randomUUID().toString(), bookId = bookId, chapter = progress.chapter,
+            cfi = progress.cfi, chapterId = progress.chapterId, fraction = progress.fraction,
+            sectionIndex = progress.sectionIndex, page = progress.page, excerpt = excerpt.take(160),
+        ))
+    }
+
+    suspend fun removeBookmark(id: String) = change { state -> state.copy(bookmarks = state.bookmarks.filterNot { it.id == id }) }
+
+    suspend fun forgetReaderFont(): String {
+        var previous = ""
+        change { state ->
+            previous = state.settings.fontFile
+            state.copy(settings = state.settings.copy(fontMode = if (state.settings.fontMode == "custom") "system" else state.settings.fontMode,
+                fontFile = "", fontLabel = ""))
+        }
+        return previous
+    }
+
+    suspend fun forgetUiFont(): String {
+        var previous = ""
+        change { state -> previous = state.appearance.fontFile; state.copy(appearance = AppAppearance()) }
+        return previous
+    }
+
+    suspend fun forgetBackground(id: String): String {
+        var previous = ""
+        change { state ->
+            previous = state.settings.backgroundPresets.find { it.id == id }?.file.orEmpty()
+            state.copy(settings = state.settings.copy(
+                background = if (state.settings.background == id) "none" else state.settings.background,
+                backgroundPresets = state.settings.backgroundPresets.filterNot { it.id == id },
+            ))
+        }
+        return previous
+    }
 }

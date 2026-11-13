@@ -28,8 +28,10 @@ import kotlin.math.sin
 class PageCurlView(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val shadow = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val back = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(231, 226, 216) }
+    private val back = Paint(Paint.ANTI_ALIAS_FLAG)
     var paperColor: Int = Color.rgb(246, 241, 231)
+    private var capturedPaperColor = paperColor
+    val isBusy: Boolean get() = busy
     private val columns = 64
     private val rows = 8
     private val vertices = FloatArray((columns + 1) * (rows + 1) * 2)
@@ -63,9 +65,12 @@ class PageCurlView(context: Context) : View(context) {
         handler.postDelayed(watchdog, 2200)
         val image = try { Bitmap.createBitmap(area.width(), area.height(), Bitmap.Config.ARGB_8888) }
             catch (_: OutOfMemoryError) { clear(); captured(); return }
-        // Allow Compose to remove menus before copying the window.
-        postOnAnimation {
-            if (token != generation) { image.recycle(); return@postOnAnimation }
+        // onActiveChanged removes the menu subtree (not its animated exit).
+        // Wait for that Compose frame to be submitted before PixelCopy reads it.
+        // Two vsyncs avoid capturing the previous window buffer, not a 110ms exit.
+        capturedPaperColor = paperColor
+        postOnAnimation { postOnAnimation captureFrame@{
+            if (token != generation) { image.recycle(); return@captureFrame }
             try {
                 PixelCopy.request(window, area, image, { result ->
                     if (token != generation) { image.recycle(); return@request }
@@ -85,7 +90,7 @@ class PageCurlView(context: Context) : View(context) {
                 clear()
                 captured()
             }
-        }
+        } }
     }
 
     fun turnEnd() {
@@ -198,7 +203,7 @@ class PageCurlView(context: Context) : View(context) {
         silhouette.lineTo(tip, h + lift)
         silhouette.close()
         back.shader = LinearGradient(tip.coerceAtMost(edge - 1f), 0f, edge, 0f,
-            intArrayOf(tone(paperColor, .97f), tone(paperColor, .85f), tone(paperColor, 1.05f)),
+            intArrayOf(tone(capturedPaperColor, .97f), tone(capturedPaperColor, .85f), tone(capturedPaperColor, 1.05f)),
             floatArrayOf(0f, .75f, 1f), Shader.TileMode.CLAMP)
         canvas.drawPath(silhouette, back)
         back.shader = null

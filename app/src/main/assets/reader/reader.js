@@ -344,8 +344,51 @@ function publish() {
     })
 }
 
+// Keep retry affordances on the existing image node so stored CFIs do not shift.
+function bindImages(doc, token) {
+    for (const image of doc.querySelectorAll('img')) {
+        let failed = false, retrying = false
+        const original = { alt: image.alt, role: image.getAttribute('role'), tab: image.getAttribute('tabindex'),
+            minWidth: image.style.minInlineSize, minHeight: image.style.minBlockSize, cursor: image.style.cursor }
+        const unavailable = () => {
+            if (token !== generation) return
+            failed = true; retrying = false
+            image.alt = '插图加载失败，点此重试'
+            image.setAttribute('role', 'button'); image.tabIndex = 0
+            image.style.minInlineSize = '80%'; image.style.minBlockSize = '48px'; image.style.cursor = 'pointer'
+        }
+        const retry = event => {
+            if (!failed) return
+            event.preventDefault(); event.stopPropagation()
+            if (retrying || token !== generation) return
+            retrying = true; image.alt = '正在加载插图'
+            let url
+            try { url = new URL(image.currentSrc || image.src, doc.baseURI) }
+            catch { unavailable(); return }
+            if (url.origin === ORIGIN && url.pathname.startsWith('/image/')) url.searchParams.set('retry', Date.now())
+            image.removeAttribute('srcset')
+            image.src = url.href
+        }
+        image.addEventListener('error', unavailable)
+        image.addEventListener('click', retry)
+        image.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') retry(event) })
+        image.addEventListener('load', () => {
+            if (!failed || token !== generation) return
+            failed = retrying = false
+            image.alt = original.alt
+            for (const [name, value] of [['role', original.role], ['tabindex', original.tab]]) {
+                if (value == null) image.removeAttribute(name); else image.setAttribute(name, value)
+            }
+            image.style.minInlineSize = original.minWidth; image.style.minBlockSize = original.minHeight
+            image.style.cursor = original.cursor
+            if (ready && !fault && latest?.cfi) commands({ type: 'restoreCFI', cfi: latest.cfi, unlessMoved: true })
+        })
+        if (image.complete && !image.naturalWidth) unavailable()
+    }
+}
 function bindDocument(doc, owner, token) {
     paintDocument(doc)
+    bindImages(doc, token)
     bindGestures(doc, token)
     let down
     const selection = () => !doc.getSelection()?.isCollapsed
@@ -379,6 +422,7 @@ function bindDocument(doc, owner, token) {
     }, { passive: true })
     doc.addEventListener('pointermove', event => {
         if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 10) {
+            if (!down.moved) send({ type: 'interaction', kind: 'swipe' })
             down.moved = true
             touchUntil = performance.now() + 400
         }
@@ -389,7 +433,7 @@ function bindDocument(doc, owner, token) {
         const element = event.target.nodeType === 1 ? event.target : event.target.parentElement
         if (!down || down.moved || down.selected || selection() || event.detail > 1 || lastTap?.double
             || performance.now() - down.time > 350 || event.defaultPrevented
-            || element?.closest('a, button, input, textarea, select, label, audio, video, [contenteditable]')) return
+            || element?.closest('a, button, [role="button"], input, textarea, select, label, audio, video, [contenteditable]')) return
         const frame = doc.defaultView.frameElement
         const rect = frame.getBoundingClientRect()
         const bounds = owner.getBoundingClientRect()
@@ -459,9 +503,8 @@ function bindGestures(target, token) {
         if (curl()) event.stopImmediatePropagation()
     }, opts)
     target.addEventListener('wheel', () => send({ type: 'interaction', kind: 'swipe' }), { passive: true })
-    target.addEventListener('scroll', () => {
-        if (!working) send({ type: 'interaction', kind: 'swipe' })
-    }, { capture: true, passive: true })
+    // Scroll events also arrive after programmatic slider/CFI navigation.
+    // Only physical touch, pointer and wheel input can dismiss native controls.
 }
 
 function checkTarget(target) {
@@ -602,6 +645,7 @@ async function execute(command) {
             applySettings()
             if (layoutChanged && ready) await restoreCFI(anchor)
         }
+        publish()
         return
     }
     if (command.type === 'retry') {
@@ -618,7 +662,10 @@ async function execute(command) {
         await go(anchor)
         pendingLoaded = true
     }
-    if (command.type === 'restoreCFI') {
+    if (command.type === 'bookmark') {
+        send({ type: 'bookmarkData', cfi: latest.cfi, excerpt: latest.range?.toString().replace(/\s+/g, ' ').trim().slice(0, 160) || '' })
+    } else if (command.type === 'restoreCFI') {
+        if (command.unlessMoved && command.cfi !== latest?.cfi) return
         await go(command.cfi)
     } else if (command.type === 'page') {
         const index = latest?.section?.current ?? view.resolveCFI(latest.cfi)?.index
@@ -636,7 +683,12 @@ async function execute(command) {
         if (fault) throw fault
     } else if (command.type === 'goto') {
         if (typeof command.href !== 'string' || !command.href) throw new Error('无效的章节链接')
-        await go(command.href)
+        try { await go(command.href) }
+        catch (error) {
+            if (fault || !Number.isInteger(command.fallbackIndex) || command.fallbackIndex < 0
+                || command.fallbackIndex >= book.sections.length) throw error
+            await go(command.fallbackIndex)
+        }
     } else if (command.type === 'section') {
         if (command.delta !== -1 && command.delta !== 1) return
         let index = (latest?.section?.current ?? view.resolveCFI(latest.cfi)?.index) + command.delta
@@ -664,7 +716,7 @@ async function execute(command) {
     publish()
 }
 function commands(command) {
-    if (!command || !['next', 'prev', 'nativeTurn', 'page', 'restoreCFI', 'section', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
+    if (!command || !['next', 'prev', 'nativeTurn', 'page', 'bookmark', 'restoreCFI', 'section', 'goto', 'fraction', 'settings', 'retry'].includes(command.type))
         return Promise.resolve()
     if (command.type === 'nativeTurn' && command.direction !== 1 && command.direction !== -1)
         return Promise.resolve()
@@ -701,7 +753,7 @@ function commands(command) {
     if (turn && turnQueued) return serial
     if (turn) turnQueued = true
     if (['section', 'goto', 'fraction'].includes(command.type))
-        send({ type: 'interaction', kind: 'turn' })
+        send({ type: 'interaction', kind: 'turn', source: command.source })
     serial = serial.then(async () => {
         working = true
         const before = `${latest?.section?.current}:${pagination?.page}:${latest?.cfi}`

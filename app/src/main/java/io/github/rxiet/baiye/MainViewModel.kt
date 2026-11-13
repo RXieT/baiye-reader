@@ -163,6 +163,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun appearance(appearance: AppAppearance) = viewModelScope.launch { app.library.appearance(appearance) }
+    fun deleteReaderFont() = viewModelScope.launch { app.deleteReaderFont() }
+    fun deleteUiFont() = viewModelScope.launch { app.deleteUiFont() }
+    fun deleteBackground(preset: BackgroundPreset) = viewModelScope.launch { app.deleteBackground(preset.id) }
 
     fun importFont(uri: Uri, forInterface: Boolean = false) = viewModelScope.launch {
         try {

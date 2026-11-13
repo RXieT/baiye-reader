@@ -2,9 +2,9 @@
 
 首先说明是vibecoding项目，下述readme由ai填写，因为只是用于满足个人所需所以我不会补充readme，也不会长时间更新。
 
-Android 轻小说阅读器。支持文库列表连续加载、书架、章节缓存和 EPUB 导入。使用白底界面与 Miuix OS4 玻璃底栏。阅读页提供时间、电量、章节页码，以及目录、排版、背景和阅读控制分级菜单。
+Android 轻小说阅读器。支持文库列表连续加载、书架、章节缓存和 EPUB 导入。使用白底界面与 Miuix OS4 玻璃底栏。阅读页提供时间、电量、章节页码、本地书签，以及目录、排版、背景和阅读控制分级菜单。支持文库账号登录、评论阅读、发帖与回复；导入的字体及背景预设可删除。
 
-需要 Android 13 及以上、较新的 Android System WebView。安装包见 [Actions](https://github.com/RXieT/baiye-reader/actions/workflows/android.yml) 的 `Baiye-Android`，其中 `Baiye.apk` 可直接安装。
+需要 Android 13 及以上、较新的 Android System WebView。可直接下载 [最新 APK](https://github.com/RXieT/baiye-reader/releases/latest/download/Baiye.apk)，或在 [Actions](https://github.com/RXieT/baiye-reader/actions/workflows/android.yml) 下载 `Baiye-Android`。
 
 ## 参考/使用的开源项目
 
@@ -27,6 +27,8 @@ bash scripts/build-miuix.sh
 
 中继构建配置使用环境变量 `WENKU_RELAY_BUILD_KEY`，由仓库 Actions Secret 提供；空配置改用网页来源，可能受源站验证限制。Release 签名也由 Actions Secret 提供，不在仓库中。
 
-书架和进度仅保存在设备内，卸载会删除。在线章节按需缓存；目录、章节顺序改变时优先按章节编号恢复。内容来自第三方站点，不随源码或安装包分发，也不保证源站持续可用。
+账号请求通过原项目使用的 `https://wenku8-relay.mewx.org/` 中继发送。密码只用于用户主动发起的登录请求，不写入存储或日志；会话使用 Android Keystore AES-GCM 加密保存，退出会清除本机会话。评论仅在明确点击发送后提交，网络中断时不会自动重发。原服务使用 GBK 评论编码，无法表示的字符会提示错误，不静默替换。
+
+书架、进度和书签仅保存在设备内，卸载会删除。在线章节按需缓存；目录、章节顺序改变时优先按章节编号恢复。内容来自第三方站点，不随源码或安装包分发，也不保证源站持续可用。
 
 验证记录见 [docs/testing.md](docs/testing.md)。

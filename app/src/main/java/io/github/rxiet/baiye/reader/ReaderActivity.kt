@@ -26,6 +26,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.slideInVertically
@@ -129,6 +130,7 @@ class ReaderActivity : ComponentActivity() {
         val settings by vm.readerSettings.collectAsStateWithLifecycle()
         val toc by vm.toc.collectAsStateWithLifecycle()
         val progress by vm.progress.collectAsStateWithLifecycle()
+        val bookmarks by vm.bookmarks.collectAsStateWithLifecycle()
         val ready by vm.ready.collectAsStateWithLifecycle()
         val fixedLayout by vm.fixedLayout.collectAsStateWithLifecycle()
         var webView by remember { mutableStateOf<WebView?>(null) }
@@ -156,9 +158,10 @@ class ReaderActivity : ComponentActivity() {
         val rawCommand: (JSONObject) -> Unit = { data ->
             webView?.evaluateJavascript("window.Reader?.commands(${data});", null)
         }
-        val turn: (Int) -> Unit = { delta ->
-            panel = ""
+        val turn: (Int) -> Unit = turn@{ delta ->
             val native = curlView
+            if (native?.isBusy == true) return@turn
+            panel = ""
             if (settings.turnAnimation == "none" || settings.scroll || native == null) {
                 rawCommand(JSONObject().put("type", "nativeTurn").put("direction", delta))
             } else {
@@ -175,6 +178,20 @@ class ReaderActivity : ComponentActivity() {
                 else -> rawCommand(data)
             }
         }
+        // AndroidView.factory runs once: its callbacks must dereference current
+        // settings/commands rather than the first composition's turn closure.
+        val currentTurn by rememberUpdatedState(turn)
+        val currentReaderEvent by rememberUpdatedState<(JSONObject) -> Unit> { event ->
+            when (event.optString("type")) {
+                "turn" -> currentTurn(if (event.optInt("direction", 1) < 0) -1 else 1)
+                "turnEnd" -> if (event.optBoolean("changed", true)) curlView?.turnEnd() else curlView?.clear()
+                "interaction", "nativeTurn" -> if (event.optString("source") !in listOf("slider", "toolbar")) {
+                    panel = ""
+                    seek = null
+                    seeking = false
+                }
+            }
+        }
         val retry: () -> Unit = {
             val needsNewWebView = rendererLost || webView == null || error == "请更新 WebView"
             vm.error.value = null
@@ -185,7 +202,7 @@ class ReaderActivity : ComponentActivity() {
         }
         val backPanel: () -> Unit = {
             panel = when (panel) {
-                "background", "brightness", "turn" -> "more"
+                "background", "brightness", "turn", "bookmarks" -> "more"
                 "main", "" -> ""
                 else -> "main"
             }
@@ -259,20 +276,7 @@ class ReaderActivity : ComponentActivity() {
                                 try {
                                     buildWebView(context, vm, doc,
                                         onTap = { panel = if (panel.isEmpty()) "main" else "" },
-                                        onReaderEvent = { event ->
-                                            when (event.optString("type")) {
-                                                "turn" -> turn(if (event.optInt("direction", 1) < 0) -1 else 1)
-                                                "turnEnd" -> if (event.optBoolean("changed", true)) curlView?.turnEnd() else curlView?.clear()
-                                                "interaction", "nativeTurn" -> {
-                                                    val slider = event.optString("source") == "slider"
-                                                    if (!slider) {
-                                                        panel = ""
-                                                        seek = null
-                                                        seeking = false
-                                                    }
-                                                }
-                                            }
-                                        }).also { webView = it }
+                                        onReaderEvent = { event -> currentReaderEvent(event) }).also { webView = it }
                                 } catch (failure: Exception) {
                                     android.util.Log.w("BaiyeReader", "WebView initialization failed", failure)
                                     vm.error.value = "请更新 WebView"
@@ -289,7 +293,8 @@ class ReaderActivity : ComponentActivity() {
             AndroidView(factory = { context -> PageCurlView(context).also {
                 it.onActiveChanged = { active -> turnOverlayActive = active }
                 curlView = it
-            } }, modifier = Modifier.fillMaxSize().zIndex(if (turnOverlayActive) 1f else -1f))
+            } }, update = { it.paperColor = paper.toArgb() },
+                modifier = Modifier.fillMaxSize().zIndex(if (turnOverlayActive) 1f else -1f))
             if (!turnOverlayActive) {
                 val overlayColors = if (settings.theme == "night") darkColorScheme(primary = Accent,
                     background = paper, surface = Color(0xFF242424)) else MiuixTheme.colorScheme
@@ -306,13 +311,24 @@ class ReaderActivity : ComponentActivity() {
                 }, onSeekFinished = { seeking = false },
                 onSection = { delta ->
                     seek = null; seeking = false
-                    command(JSONObject().put("type", "section").put("delta", delta))
+                    command(JSONObject().put("type", "section").put("delta", delta).put("source", "toolbar"))
                 }, secondary = { page ->
                     if (page == "toc") ReaderContents(toc, progress.tocHref, foreground) { href ->
                         command(JSONObject().put("type", "goto").put("href", href)); panel = ""
-                    } else ReadingPreferences(settings = settings, onChange = { vm.settings(it) }, section = page,
+                    } else if (page == "bookmarks") ReaderBookmarksPanel(bookmarks, progress.cfi, ready,
+                        onAdd = { command(JSONObject().put("type", "bookmark")) },
+                        onGo = { bookmark ->
+                            val target = vm.bookmarkTarget(bookmark)
+                            if (target != null) {
+                                command(JSONObject().put("type", "goto").put("href", target)
+                                    .put("fallbackIndex", vm.bookmarkSectionIndex(bookmark))); panel = ""
+                            } else android.widget.Toast.makeText(this, "书签对应章节已移除", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        onDelete = { vm.removeBookmark(it) })
+                    else ReadingPreferences(settings = settings, onChange = { vm.settings(it) }, section = page,
                         onImportFont = { importFont.launch(arrayOf("font/ttf", "font/otf", "application/octet-stream", "application/x-font-ttf", "application/vnd.ms-opentype")) },
-                        onImportBackground = { importBackground.launch(arrayOf("image/*")) })
+                        onImportBackground = { importBackground.launch(arrayOf("image/*")) },
+                        onDeleteFont = { vm.deleteFont() }, onDeleteBackground = { vm.deleteBackground(it) })
                 })
                 }
             }
@@ -402,7 +418,7 @@ class ReaderActivity : ComponentActivity() {
             exit = fadeOut(tween(80)) + slideOutVertically(tween(95)) { it / 18 }) {
             val page = if (secondaryPanel) panel else retained
             val available = LocalConfiguration.current.screenHeightDp.dp
-            Column(Modifier.fillMaxWidth().height((available * if (page == "toc") .55f else .38f).coerceIn(240.dp, 480.dp))
+            Column(Modifier.fillMaxWidth().height((available * if (page == "toc" || page == "bookmarks") .55f else .38f).coerceIn(240.dp, 480.dp))
                 .background(paper, androidx.compose.foundation.shape.RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
                 .padding(horizontal = 12.dp)) {
                 Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -410,7 +426,7 @@ class ReaderActivity : ComponentActivity() {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回上级", tint = ink)
                     }
                     Text(when (page) {
-                        "toc" -> "目录"; "type" -> "排版"; "font" -> "字体"; "background" -> "背景"; else -> "更多"
+                        "toc" -> "目录"; "bookmarks" -> "书签"; "type" -> "排版"; "font" -> "字体"; "background" -> "背景"; else -> "更多"
                     }, Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.Medium, color = ink)
                     IconButton(onClick = { onPanel("") }, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Default.Close, contentDescription = "关闭菜单", tint = ink)
@@ -418,11 +434,13 @@ class ReaderActivity : ComponentActivity() {
                 }
                 Box(Modifier.fillMaxWidth().weight(1f)) {
                     if (page == "more") Column(Modifier.fillMaxSize()) {
-                        Button(onClick = { onPanel("background") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            colors = ButtonDefaults.buttonColors(color = ink.copy(alpha = .06f), contentColor = ink)) {
-                            MenuGlyph("background", ink)
-                            Spacer(Modifier.width(12.dp))
-                            Text("背景与亮度", fontSize = 16.sp)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("background" to "背景与亮度", "bookmarks" to "书签").forEach { (key, label) ->
+                                Button(onClick = { onPanel(key) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                    colors = ButtonDefaults.buttonColors(color = ink.copy(alpha = .06f), contentColor = ink)) {
+                                    Text(label, fontSize = 15.sp, maxLines = 1)
+                                }
+                            }
                         }
                         Box(Modifier.fillMaxWidth().weight(1f)) { secondary("more") }
                     } else secondary(page)
@@ -463,7 +481,8 @@ class ReaderActivity : ComponentActivity() {
             items(visible, key = { it }) { index ->
                 val item = toc[index]
                 val group = index in groups
-                Row(Modifier.fillMaxWidth().clickable {
+                val caret by animateFloatAsState(if (index in expanded) .65f else .35f, tween(160), label = "reader-volume")
+                Row(Modifier.animateItem(fadeInSpec = tween(120), fadeOutSpec = tween(100), placementSpec = tween(160)).fillMaxWidth().clickable {
                     if (group) expanded = if (index in expanded) expanded - index else expanded + index
                     else if (item.href.isNotBlank()) go(item.href)
                 }.heightIn(min = 48.dp)
@@ -473,7 +492,7 @@ class ReaderActivity : ComponentActivity() {
                         fontWeight = if (group || index == current) FontWeight.Medium else FontWeight.Normal,
                         color = if (index == current) MiuixTheme.colorScheme.primary else ink, lineHeight = 24.sp)
                     if (group) Canvas(Modifier.size(16.dp)) {
-                        val y = if (index in expanded) .65f else .35f
+                        val y = caret
                         drawLine(ink, Offset(size.width * .2f, size.height * (1f - y)), Offset(size.width * .5f, size.height * y), 1.5.dp.toPx())
                         drawLine(ink, Offset(size.width * .5f, size.height * y), Offset(size.width * .8f, size.height * (1f - y)), 1.5.dp.toPx())
                     }
@@ -656,7 +675,8 @@ class ReaderActivity : ComponentActivity() {
                         }
                         uri.pathSegments.firstOrNull() == "image" -> {
                             val key = uri.pathSegments.getOrNull(1) ?: error("Unknown image")
-                            val image = vm.app.repository.image(key)
+                            val image = if (uri.getQueryParameter("retry")?.toLongOrNull() != null) vm.app.repository.retryImage(key)
+                                else vm.app.repository.image(key)
                             WebResourceResponse(image.second, null, ByteArrayInputStream(image.first)).apply {
                                 responseHeaders = mapOf("Cache-Control" to "private, max-age=604800", "X-Content-Type-Options" to "nosniff")
                             }
@@ -693,6 +713,7 @@ class ReaderActivity : ComponentActivity() {
                         }
                         vm.readerReady()
                     }
+                    "bookmarkData" -> vm.addBookmark(data.optString("excerpt"), data.optString("cfi"))
                     "loaded" -> vm.error.value = null
                     "relocate" -> {
                         val sectionCount = data.optInt("sectionCount", 0).coerceIn(0, 100000)

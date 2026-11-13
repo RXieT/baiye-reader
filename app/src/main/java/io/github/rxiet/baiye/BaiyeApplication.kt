@@ -35,8 +35,9 @@ class BaiyeApplication : Application(), SingletonImageLoader.Factory {
             .retryOnConnectionFailure(true)
             .addInterceptor { chain ->
                 val original = chain.request()
-                val request = if ((original.url.host == "wenku8.com" || original.url.host.endsWith(".wenku8.com")) && original.method == "GET") {
-                    original.newBuilder().header("Referer", "https://www.wenku8.net/").build()
+                val request = if ((original.url.host == "wenku8.com" || original.url.host.endsWith(".wenku8.com")) &&
+                    original.method == "GET" && original.header("Referer").isNullOrBlank()) {
+                    original.newBuilder().header("Referer", "${original.url.scheme}://www.wenku8.net/").build()
                 } else original
                 chain.proceed(request)
             }.build()
@@ -45,6 +46,7 @@ class BaiyeApplication : Application(), SingletonImageLoader.Factory {
     val repository by lazy { WenkuRepository(this, httpClient) }
     val importer by lazy { EpubImporter(this) }
     val media by lazy { io.github.rxiet.baiye.reader.ReaderMediaStore(this) }
+    val account by lazy { io.github.rxiet.baiye.data.AccountRepository(this, httpClient) }
 
     override fun newImageLoader(context: Context): ImageLoader = ImageLoader.Builder(context)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { httpClient })) }
@@ -52,6 +54,21 @@ class BaiyeApplication : Application(), SingletonImageLoader.Factory {
         .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers")).maxSizeBytes(96L * 1024 * 1024).build() }
         .crossfade(180)
         .build()
+
+    suspend fun deleteReaderFont() {
+        val name = library.forgetReaderFont()
+        if (name.isNotEmpty() && library.state.value.appearance.fontFile != name) media.deleteFont(name)
+    }
+
+    suspend fun deleteUiFont() {
+        val name = library.forgetUiFont()
+        if (name.isNotEmpty() && library.state.value.settings.fontFile != name) media.deleteFont(name)
+    }
+
+    suspend fun deleteBackground(id: String) {
+        val name = library.forgetBackground(id)
+        if (name.isNotEmpty() && library.state.value.settings.backgroundPresets.none { it.file == name }) media.deleteBackground(name)
+    }
 
     fun prefetchCovers(books: List<Book>) {
         val loader = SingletonImageLoader.get(this)
