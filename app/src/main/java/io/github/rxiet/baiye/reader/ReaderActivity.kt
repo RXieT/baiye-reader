@@ -322,7 +322,7 @@ class ReaderActivity : ComponentActivity() {
                             if (target != null) {
                                 command(JSONObject().put("type", "goto").put("href", target)
                                     .put("fallbackIndex", vm.bookmarkSectionIndex(bookmark))); panel = ""
-                            } else android.widget.Toast.makeText(this, "书签对应章节已移除", android.widget.Toast.LENGTH_SHORT).show()
+                            } else android.widget.Toast.makeText(this@ReaderActivity, "书签对应章节已移除", android.widget.Toast.LENGTH_SHORT).show()
                         },
                         onDelete = { vm.removeBookmark(it) })
                     else ReadingPreferences(settings = settings, onChange = { vm.settings(it) }, section = page,
